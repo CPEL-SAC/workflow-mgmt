@@ -23,8 +23,9 @@ on:
         type: string
       environment:
         description: 'Ambiente de despliegue (test/prod)'
-        required: true
+        required: false
         type: string
+        default: 'test'
       dockerfile:
         description: 'Path al Dockerfile'
         required: false
@@ -44,6 +45,9 @@ on:
       gcloud_sa_key:
         description: 'Service Account Key de Google Cloud (JSON)'
         required: true
+      github_token:
+        description: 'GitHub Personal Access Token para acceder a workflow-mgmt'
+        required: false
     outputs:
       service_url:
         description: 'URL del servicio desplegado'
@@ -70,7 +74,7 @@ jobs:
       with:
         repository: CPEL-SAC/workflow-mgmt
         path: .workflow-mgmt
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.github_token || secrets.GITHUB_TOKEN }}
 
     - name: Generar image tag
       id: image_tag
