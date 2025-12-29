@@ -1,0 +1,160 @@
+name: 'Deploy to Cloud Run'
+description: 'Build Docker image and deploy to Google Cloud Run'
+inputs:
+  service_name:
+    description: 'Nombre del servicio en Cloud Run'
+    required: true
+  project_id:
+    description: 'ID del proyecto de Google Cloud'
+    required: true
+  region:
+    description: 'Región de Google Cloud'
+    required: false
+    default: 'us-central1'
+  dockerfile:
+    description: 'Path al Dockerfile'
+    required: false
+    default: 'dockerfile'
+  artifact_registry_name:
+    description: 'Nombre del Artifact Registry'
+    required: false
+    default: 'docker-images'
+  gcloud_sa_key:
+    description: 'Service Account Key de Google Cloud (JSON)'
+    required: true
+  timeout:
+    description: 'Timeout del servicio en segundos'
+    required: false
+    default: '3600'
+outputs:
+  image_url:
+    description: 'URL de la imagen Docker desplegada'
+    value: ${{ steps.build_push.outputs.image }}
+  service_url:
+    description: 'URL del servicio desplegado'
+    value: ${{ steps.get_url.outputs.url }}
+  image_tag:
+    description: 'Tag de la imagen'
+    value: ${{ steps.image_tag.outputs.tag }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout workflow-mgmt scripts
+      uses: actions/checkout@v4
+      with:
+        repository: CPEL-SAC/workflow-mgmt
+        path: .workflow-mgmt-action
+        token: ${{ github.token }}
+      shell: bash
+
+    - name: Generar image tag
+      id: image_tag
+      shell: bash
+      run: |
+        COMMIT_SHORT=$(git rev-parse --short HEAD)
+        IMAGE_TAG="dev-${COMMIT_SHORT}"
+        echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+        echo "commit=${COMMIT_SHORT}" >> $GITHUB_OUTPUT
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Configurar Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        version: 'latest'
+
+    - name: Autenticar con Google Cloud
+      shell: bash
+      env:
+        GCLOUD_SA_KEY: ${{ inputs.gcloud_sa_key }}
+        GCLOUD_PROJECT_ID: ${{ inputs.project_id }}
+      run: |
+        bash .workflow-mgmt-action/scripts/gcloud/auth.sh
+
+    - name: Configurar Artifact Registry
+      id: setup_registry
+      shell: bash
+      env:
+        GCLOUD_PROJECT_ID: ${{ inputs.project_id }}
+      run: |
+        OUTPUT=$(bash .workflow-mgmt-action/scripts/gcloud/setup-artifact-registry.sh \
+          "${{ inputs.artifact_registry_name }}" \
+          "${{ inputs.region }}")
+
+        REGISTRY_URL=$(echo "$OUTPUT" | grep "ARTIFACT_REGISTRY_URL=" | cut -d'=' -f2)
+        echo "url=${REGISTRY_URL}" >> $GITHUB_OUTPUT
+
+    - name: Build imagen Docker
+      id: docker_build
+      shell: bash
+      run: |
+        FULL_IMAGE="${{ steps.setup_registry.outputs.url }}/${{ inputs.service_name }}:${{ steps.image_tag.outputs.tag }}"
+
+        docker build \
+          -f ${{ inputs.dockerfile }} \
+          -t "${FULL_IMAGE}" \
+          -t "${{ steps.setup_registry.outputs.url }}/${{ inputs.service_name }}:latest" \
+          .
+
+        echo "image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
+
+    - name: Push imagen a Artifact Registry
+      id: build_push
+      shell: bash
+      run: |
+        FULL_IMAGE="${{ steps.docker_build.outputs.image }}"
+
+        docker push "${FULL_IMAGE}"
+        docker push "${{ steps.setup_registry.outputs.url }}/${{ inputs.service_name }}:latest"
+
+        echo "image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
+
+    - name: Desplegar a Cloud Run
+      shell: bash
+      env:
+        GCLOUD_PROJECT_ID: ${{ inputs.project_id }}
+      run: |
+        # Obtener variables del secret
+        SECRET_DATA=$(gcloud secrets versions access latest \
+          --secret="${{ inputs.service_name }}" \
+          --project="${{ inputs.project_id }}" 2>/dev/null || echo "{}")
+
+        ENV_VARS=$(echo "$SECRET_DATA" | jq -r 'to_entries | map("\(.key)=\(.value)") | join(",")')
+
+        # Deploy
+        if [[ -n "$ENV_VARS" ]] && [[ "$ENV_VARS" != "" ]]; then
+          gcloud run deploy ${{ inputs.service_name }} \
+            --image ${{ steps.build_push.outputs.image }} \
+            --platform managed \
+            --region ${{ inputs.region }} \
+            --project ${{ inputs.project_id }} \
+            --timeout=${{ inputs.timeout }} \
+            --set-env-vars="$ENV_VARS" \
+            --quiet
+        else
+          gcloud run deploy ${{ inputs.service_name }} \
+            --image ${{ steps.build_push.outputs.image }} \
+            --platform managed \
+            --region ${{ inputs.region }} \
+            --project ${{ inputs.project_id }} \
+            --timeout=${{ inputs.timeout }} \
+            --quiet
+        fi
+
+    - name: Obtener URL del servicio
+      id: get_url
+      shell: bash
+      run: |
+        SERVICE_URL=$(gcloud run services describe ${{ inputs.service_name }} \
+          --region ${{ inputs.region }} \
+          --project ${{ inputs.project_id }} \
+          --format='value(status.url)' 2>/dev/null || echo "")
+        echo "url=${SERVICE_URL}" >> $GITHUB_OUTPUT
+
+    - name: Cleanup
+      if: always()
+      shell: bash
+      run: |
+        gcloud auth revoke --all || true
