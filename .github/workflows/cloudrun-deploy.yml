@@ -45,7 +45,7 @@ on:
       gcloud_sa_key:
         description: 'Service Account Key de Google Cloud (JSON)'
         required: true
-      github_token:
+      gh_pat:
         description: 'GitHub Personal Access Token para acceder a workflow-mgmt'
         required: false
     outputs:
@@ -74,7 +74,7 @@ jobs:
       with:
         repository: CPEL-SAC/workflow-mgmt
         path: .workflow-mgmt
-        token: ${{ secrets.github_token || secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.gh_pat || secrets.GITHUB_TOKEN }}
 
     - name: Generar image tag
       id: image_tag
