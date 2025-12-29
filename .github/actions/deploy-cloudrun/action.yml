@@ -26,6 +26,9 @@ inputs:
     description: 'Timeout del servicio en segundos'
     required: false
     default: '3600'
+  github_token:
+    description: 'GitHub token for accessing private repos'
+    required: true
 outputs:
   image_url:
     description: 'URL de la imagen Docker desplegada'
@@ -45,7 +48,7 @@ runs:
       with:
         repository: CPEL-SAC/workflow-mgmt
         path: .workflow-mgmt-action
-        token: ${{ github.token }}
+        token: ${{ inputs.github_token }}
       shell: bash
 
     - name: Generar image tag
