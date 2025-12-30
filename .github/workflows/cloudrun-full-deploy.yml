@@ -84,17 +84,19 @@ jobs:
             --secret=${{ inputs.service_name }} \
             --project=${{ inputs.project_id }} 2>/dev/null || echo "{}")
 
-          ENV_VARS=$(echo "$SECRET_DATA" | jq -r 'to_entries | map("\(.key)=\(.value)") | join(",")')
+          if [[ "$SECRET_DATA" != "{}" ]] && [[ -n "$SECRET_DATA" ]]; then
+            echo "$SECRET_DATA" > /tmp/env-vars.json
 
-          if [[ -n "$ENV_VARS" ]] && [[ "$ENV_VARS" != "" ]]; then
             gcloud run deploy ${{ inputs.service_name }} \
               --image ${{ steps.tag.outputs.url }} \
               --platform managed \
               --region ${{ inputs.region }} \
               --project ${{ inputs.project_id }} \
               --timeout=${{ inputs.timeout }} \
-              --set-env-vars="$ENV_VARS" \
+              --update-env-vars "^@^/tmp/env-vars.json" \
               --quiet
+
+            rm /tmp/env-vars.json
           else
             gcloud run deploy ${{ inputs.service_name }} \
               --image ${{ steps.tag.outputs.url }} \
