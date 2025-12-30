@@ -93,7 +93,7 @@ jobs:
               --region ${{ inputs.region }} \
               --project ${{ inputs.project_id }} \
               --timeout=${{ inputs.timeout }} \
-              --update-env-vars "^@^/tmp/env-vars.json" \
+              --update-env-vars "^:^/tmp/env-vars.json" \
               --quiet
 
             rm /tmp/env-vars.json
