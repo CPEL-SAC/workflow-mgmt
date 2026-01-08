@@ -24,7 +24,7 @@ on:
       registry_name:
         required: false
         type: string
-        default: 'docker-images'
+        default: 'cloudrun-images'
       timeout:
         required: false
         type: string
