@@ -80,9 +80,11 @@ jobs:
     - name: Deploy to Cloud Run
       run: |
         if [ "${{ inputs.use_secret_manager }}" = "true" ]; then
+          SECRET_NAME="${{ inputs.service_name }}-${{ inputs.environment }}"
+
           SECRET_DATA=$(gcloud secrets versions access latest \
-            --secret=${{ inputs.service_name }} \
-            --project=${{ inputs.project_id }} 2>/dev/null || echo "{}")
+            --secret="${SECRET_NAME}" \
+            --project=central-secrets 2>/dev/null || echo "{}")
 
           if [[ "$SECRET_DATA" != "{}" ]] && [[ -n "$SECRET_DATA" ]]; then
             echo "$SECRET_DATA" > /tmp/env-vars.json
