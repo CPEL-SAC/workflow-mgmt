@@ -1,0 +1,222 @@
+name: Hotfix Auto-Backport
+
+# Workflow reutilizable para backport automático de hotfixes a develop
+# Garantiza que las correcciones de producción se repliquen automáticamente
+
+on:
+  workflow_call:
+    inputs:
+      hotfix_branch:
+        description: 'Nombre del branch hotfix (ej: hotfix/fix-critical-bug)'
+        required: true
+        type: string
+      target_branch:
+        description: 'Branch destino para el backport (normalmente develop)'
+        required: false
+        type: string
+        default: 'develop'
+    secrets:
+      github_token:
+        description: 'GitHub token con permisos de write'
+        required: false
+
+jobs:
+  auto-backport:
+    name: Backport ${{ inputs.hotfix_branch }} → ${{ inputs.target_branch }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.github_token || secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Validate branches
+        run: |
+          echo "🔍 Validando branches..."
+          git fetch origin ${{ inputs.target_branch }}
+          git fetch origin ${{ inputs.hotfix_branch }}
+
+          if ! git show-ref --verify --quiet refs/remotes/origin/${{ inputs.hotfix_branch }}; then
+            echo "❌ Error: El branch ${{ inputs.hotfix_branch }} no existe"
+            exit 1
+          fi
+
+          if ! git show-ref --verify --quiet refs/remotes/origin/${{ inputs.target_branch }}; then
+            echo "❌ Error: El branch ${{ inputs.target_branch }} no existe"
+            exit 1
+          fi
+
+          echo "✅ Branches validados correctamente"
+
+      - name: Create backport branch
+        id: create-backport
+        run: |
+          HOTFIX_BRANCH="${{ inputs.hotfix_branch }}"
+          TARGET_BRANCH="${{ inputs.target_branch }}"
+          BACKPORT_BRANCH="backport/${HOTFIX_BRANCH}-to-${TARGET_BRANCH}"
+
+          # Limpiar nombre del branch (remover hotfix/ si existe)
+          CLEAN_HOTFIX=$(echo ${HOTFIX_BRANCH} | sed 's|hotfix/||g')
+          BACKPORT_BRANCH="backport/${CLEAN_HOTFIX}-to-${TARGET_BRANCH}"
+
+          echo "hotfix_branch=${HOTFIX_BRANCH}" >> $GITHUB_OUTPUT
+          echo "target_branch=${TARGET_BRANCH}" >> $GITHUB_OUTPUT
+          echo "backport_branch=${BACKPORT_BRANCH}" >> $GITHUB_OUTPUT
+
+          echo "📝 Hotfix: ${HOTFIX_BRANCH}"
+          echo "📝 Target: ${TARGET_BRANCH}"
+          echo "📝 Backport branch: ${BACKPORT_BRANCH}"
+
+          # Verificar si el branch de backport ya existe
+          if git show-ref --verify --quiet refs/remotes/origin/${BACKPORT_BRANCH}; then
+            echo "⚠️ El branch de backport ya existe, eliminando..."
+            git push origin --delete ${BACKPORT_BRANCH} || true
+          fi
+
+          # Crear branch de backport desde target
+          git checkout -b ${BACKPORT_BRANCH} origin/${TARGET_BRANCH}
+
+      - name: Perform backport (cherry-pick)
+        id: backport
+        continue-on-error: true
+        run: |
+          HOTFIX_BRANCH="${{ steps.create-backport.outputs.hotfix_branch }}"
+
+          echo "🔄 Intentando cherry-pick desde ${HOTFIX_BRANCH}..."
+
+          # Obtener todos los commits del hotfix
+          COMMITS=$(git log origin/${HOTFIX_BRANCH} --not origin/${{ inputs.target_branch }} --format="%H" --reverse)
+
+          if [ -z "$COMMITS" ]; then
+            echo "⚠️ No hay commits nuevos para hacer backport"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "📋 Commits a aplicar:"
+          echo "$COMMITS"
+
+          # Intentar cherry-pick
+          if git cherry-pick $COMMITS; then
+            echo "✅ Cherry-pick exitoso"
+            echo "has_conflicts=false" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Conflictos detectados durante cherry-pick"
+            echo "has_conflicts=true" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+
+            # Abortar cherry-pick y hacer merge
+            git cherry-pick --abort
+
+            # Intentar merge automático
+            if git merge --no-commit --no-ff origin/${HOTFIX_BRANCH}; then
+              git commit -m "Backport ${HOTFIX_BRANCH} to ${{ inputs.target_branch }} via merge" || true
+            else
+              # Conflictos en merge, crear commit con marcadores de conflicto
+              git add -A
+              git commit -m "Backport ${HOTFIX_BRANCH} to ${{ inputs.target_branch }} (REQUIRES MANUAL CONFLICT RESOLUTION)" || true
+            fi
+          fi
+
+      - name: Push backport branch
+        if: steps.backport.outputs.has_changes == 'true'
+        run: |
+          BACKPORT_BRANCH="${{ steps.create-backport.outputs.backport_branch }}"
+          echo "⬆️ Pushing ${BACKPORT_BRANCH}..."
+          git push origin ${BACKPORT_BRANCH}
+
+      - name: Create Pull Request
+        if: steps.backport.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.github_token || secrets.GITHUB_TOKEN }}
+        run: |
+          HOTFIX_BRANCH="${{ steps.create-backport.outputs.hotfix_branch }}"
+          TARGET_BRANCH="${{ steps.create-backport.outputs.target_branch }}"
+          BACKPORT_BRANCH="${{ steps.create-backport.outputs.backport_branch }}"
+          HAS_CONFLICTS="${{ steps.backport.outputs.has_conflicts }}"
+
+          CONFLICT_WARNING=""
+          if [ "$HAS_CONFLICTS" = "true" ]; then
+            CONFLICT_WARNING="⚠️ **ATENCIÓN: Este PR tiene conflictos que requieren resolución manual**"
+          fi
+
+          PR_BODY="## 🚨 Backport Automático de Hotfix
+
+          Este PR fue **generado automáticamente** para replicar el hotfix a ${TARGET_BRANCH}.
+
+          ${CONFLICT_WARNING}
+
+          ### 📋 Detalles
+          - **Hotfix original:** \`${HOTFIX_BRANCH}\`
+          - **Branch destino:** \`${TARGET_BRANCH}\`
+          - **Backport branch:** \`${BACKPORT_BRANCH}\`
+          - **Conflictos detectados:** ${HAS_CONFLICTS}
+
+          ### ✅ Acción Requerida
+          1. ✔️ Revisar los cambios aplicados
+          2. ✔️ Resolver conflictos si los hay
+          3. ✔️ Validar que el cambio es compatible con ${TARGET_BRANCH}
+          4. ✔️ Aprobar y mergear este PR
+
+          ### ⚠️ Importante
+          - ❌ **NO eliminar este PR** sin mergear
+          - ✅ Este backport es **OBLIGATORIO** según la estrategia Git Flow
+          - 🔒 Si hay conflictos, deben resolverse antes de mergear
+          - 📌 Esto garantiza que las correcciones de producción no se pierdan
+
+          ### 🎯 Estrategia Git Flow
+          Según la estrategia establecida:
+          > *\"Backport obligatorio hotfix/* → develop\"*
+          >
+          > Esto evita que el fix se pierda en futuros despliegues.
+
+          ---
+          🤖 Generado automáticamente por GitHub Actions
+          📅 $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+          gh pr create \
+            --base ${TARGET_BRANCH} \
+            --head ${BACKPORT_BRANCH} \
+            --title "🔄 [AUTO-BACKPORT] ${HOTFIX_BRANCH} → ${TARGET_BRANCH}" \
+            --body "${PR_BODY}" \
+            --label "hotfix-backport,automated,priority-high" || {
+              echo "⚠️ No se pudo crear el PR. Puede que ya exista."
+              echo "📋 Verificando PRs existentes..."
+              gh pr list --head ${BACKPORT_BRANCH} || true
+              exit 0
+            }
+
+      - name: Summary
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ BACKPORT AUTOMÁTICO COMPLETADO"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "📝 Detalles:"
+          echo "   Hotfix: ${{ steps.create-backport.outputs.hotfix_branch }}"
+          echo "   Destino: ${{ steps.create-backport.outputs.target_branch }}"
+          echo "   Branch creado: ${{ steps.create-backport.outputs.backport_branch }}"
+          echo ""
+          if [ "${{ steps.backport.outputs.has_changes }}" = "true" ]; then
+            echo "✅ Se creó un Pull Request automáticamente"
+            echo "🔔 El equipo debe revisar y aprobar el PR"
+            if [ "${{ steps.backport.outputs.has_conflicts }}" = "true" ]; then
+              echo "⚠️ ATENCIÓN: Hay conflictos que requieren resolución manual"
+            fi
+          else
+            echo "ℹ️ No hay cambios nuevos para hacer backport"
+          fi
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
