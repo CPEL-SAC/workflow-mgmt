@@ -71,11 +71,23 @@ jobs:
       id: build
       run: |
         echo "Building with Cloud Build to enable source tracking..."
+
+        # Create inline cloudbuild.yaml to specify dockerfile name
+        cat > /tmp/cloudbuild.yaml <<EOF
+        steps:
+        - name: 'gcr.io/cloud-builders/docker'
+          args: ['build', '-f', '${{ inputs.dockerfile }}', '-t', '${{ steps.tag.outputs.url }}', '.']
+        images:
+        - '${{ steps.tag.outputs.url }}'
+        EOF
+
         BUILD_ID=$(gcloud builds submit \
-          --tag "${{ steps.tag.outputs.url }}" \
+          --config=/tmp/cloudbuild.yaml \
           --project ${{ inputs.project_id }} \
           --timeout=600 \
           --format="value(id)")
+
+        rm /tmp/cloudbuild.yaml
 
         echo "build_id=${BUILD_ID}" >> $GITHUB_OUTPUT
         echo "✅ Build completed with ID: ${BUILD_ID}"
