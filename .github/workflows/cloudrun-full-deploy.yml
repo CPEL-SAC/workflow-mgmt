@@ -20,7 +20,7 @@ on:
       dockerfile:
         required: false
         type: string
-        default: 'dockerfile'
+        default: 'Dockerfile'
       registry_name:
         required: false
         type: string
