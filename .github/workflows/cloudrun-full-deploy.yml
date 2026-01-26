@@ -52,15 +52,10 @@ jobs:
         echo "tag=${TAG}" >> $GITHUB_OUTPUT
         echo "url=${URL}" >> $GITHUB_OUTPUT
 
-    - uses: docker/setup-buildx-action@v3
-
     - name: Authenticate to Google Cloud
       uses: google-github-actions/auth@v2
       with:
         credentials_json: ${{ secrets.gcp_credentials }}
-
-    - name: Configure Docker for Artifact Registry
-      run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
 
     - name: Ensure Artifact Registry exists
       run: |
@@ -72,10 +67,18 @@ jobs:
           --location=${{ inputs.region }} \
           --project=${{ inputs.project_id }}
 
-    - name: Build and push image
+    - name: Build and push image with Cloud Build
+      id: build
       run: |
-        docker build -f ${{ inputs.dockerfile }} -t "${{ steps.tag.outputs.url }}" .
-        docker push "${{ steps.tag.outputs.url }}"
+        echo "Building with Cloud Build to enable source tracking..."
+        BUILD_ID=$(gcloud builds submit \
+          --tag "${{ steps.tag.outputs.url }}" \
+          --project ${{ inputs.project_id }} \
+          --timeout=600 \
+          --format="value(id)")
+
+        echo "build_id=${BUILD_ID}" >> $GITHUB_OUTPUT
+        echo "✅ Build completed with ID: ${BUILD_ID}"
 
     - name: Deploy to Cloud Run
       run: |
@@ -116,4 +119,44 @@ jobs:
             --project ${{ inputs.project_id }} \
             --timeout=${{ inputs.timeout }} \
             --quiet
+        fi
+
+    - name: Update service with build source annotations
+      if: steps.build.outputs.build_id != ''
+      run: |
+        echo "Updating Cloud Run service with build source annotations..."
+
+        # Get build information
+        BUILD_ID="${{ steps.build.outputs.build_id }}"
+
+        # Get source location from the build
+        SOURCE_LOCATION=$(gcloud builds describe ${BUILD_ID} \
+          --project ${{ inputs.project_id }} \
+          --format="value(source.storageSource.bucket,source.storageSource.object,source.storageSource.generation)" \
+          | tr '\t' '/')
+
+        if [[ -n "$SOURCE_LOCATION" ]]; then
+          # Export current service config
+          gcloud run services describe ${{ inputs.service_name }} \
+            --region ${{ inputs.region }} \
+            --project ${{ inputs.project_id }} \
+            --format export > /tmp/service-config.yaml
+
+          # Add build annotations using sed
+          sed -i "/^  annotations:/a\    run.googleapis.com/build-id: ${BUILD_ID}" /tmp/service-config.yaml
+          sed -i "/^  annotations:/a\    run.googleapis.com/build-source-location: gs://${SOURCE_LOCATION}" /tmp/service-config.yaml
+
+          # Apply updated config
+          gcloud run services replace /tmp/service-config.yaml \
+            --region ${{ inputs.region }} \
+            --project ${{ inputs.project_id }} \
+            --quiet
+
+          rm /tmp/service-config.yaml
+
+          echo "✅ Build source annotations added to service"
+          echo "   Build ID: ${BUILD_ID}"
+          echo "   Source: gs://${SOURCE_LOCATION}"
+        else
+          echo "⚠️  Could not retrieve source location from build"
         fi
