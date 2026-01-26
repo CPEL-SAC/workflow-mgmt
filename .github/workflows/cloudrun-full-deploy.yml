@@ -93,17 +93,33 @@ jobs:
         echo "build_id=${BUILD_ID}" >> $GITHUB_OUTPUT
         echo "🔨 Build started with ID: ${BUILD_ID}"
 
-        # Wait for build to complete
+        # Wait for build to complete by polling status
         echo "⏳ Waiting for build to complete..."
-        gcloud builds log --stream ${BUILD_ID} --project ${{ inputs.project_id }} || true
+        BUILD_STATUS="WORKING"
+        RETRY_COUNT=0
+        MAX_RETRIES=120  # 10 minutes max (120 * 5 seconds)
 
-        # Check build status
-        BUILD_STATUS=$(gcloud builds describe ${BUILD_ID} \
-          --project ${{ inputs.project_id }} \
-          --format="value(status)")
+        while [[ "${BUILD_STATUS}" == "WORKING" || "${BUILD_STATUS}" == "QUEUED" ]]; do
+          if [[ $RETRY_COUNT -ge $MAX_RETRIES ]]; then
+            echo "❌ Build timeout after 10 minutes"
+            exit 1
+          fi
+
+          sleep 5
+          BUILD_STATUS=$(gcloud builds describe ${BUILD_ID} \
+            --project ${{ inputs.project_id }} \
+            --format="value(status)" 2>/dev/null || echo "WORKING")
+
+          RETRY_COUNT=$((RETRY_COUNT + 1))
+
+          if [[ $((RETRY_COUNT % 6)) -eq 0 ]]; then
+            echo "⏳ Still waiting... (${RETRY_COUNT}/120)"
+          fi
+        done
 
         if [[ "${BUILD_STATUS}" != "SUCCESS" ]]; then
           echo "❌ Build failed with status: ${BUILD_STATUS}"
+          echo "📋 Build logs: https://console.cloud.google.com/cloud-build/builds/${BUILD_ID}?project=${{ inputs.project_id }}"
           exit 1
         fi
 
