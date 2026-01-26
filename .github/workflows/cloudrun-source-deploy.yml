@@ -1,0 +1,103 @@
+name: Deploy to Cloud Run from Source
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      project_id:
+        required: true
+        type: string
+      environment:
+        required: false
+        type: string
+        default: 'dev'
+      region:
+        required: false
+        type: string
+        default: 'us-central1'
+      timeout:
+        required: false
+        type: string
+        default: '3600'
+      use_secret_manager:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      gcp_credentials:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.gcp_credentials }}
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Get environment variables from Secret Manager
+      if: inputs.use_secret_manager
+      id: get_secrets
+      run: |
+        SECRET_NAME="${{ inputs.service_name }}-${{ inputs.environment }}"
+
+        echo "🔐 Fetching secrets from: ${SECRET_NAME}"
+
+        SECRET_DATA=$(gcloud secrets versions access latest \
+          --secret="${SECRET_NAME}" \
+          --project=central-secrets 2>/dev/null || echo "{}")
+
+        if [[ "$SECRET_DATA" != "{}" ]] && [[ -n "$SECRET_DATA" ]]; then
+          echo "$SECRET_DATA" | jq -r 'to_entries | map("\(.key)=\(.value)") | .[]' > /tmp/env-vars.env
+          echo "✅ Found $(wc -l < /tmp/env-vars.env) environment variables"
+          echo "has_secrets=true" >> $GITHUB_OUTPUT
+        else
+          echo "⚠️  No secrets found in Secret Manager"
+          echo "has_secrets=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Deploy to Cloud Run from source
+      run: |
+        echo "🚀 Deploying from source with automatic build..."
+
+        DEPLOY_CMD="gcloud run deploy ${{ inputs.service_name }} \
+          --source . \
+          --platform managed \
+          --region ${{ inputs.region }} \
+          --project ${{ inputs.project_id }} \
+          --timeout=${{ inputs.timeout }} \
+          --quiet"
+
+        # Add env vars if available
+        if [[ "${{ steps.get_secrets.outputs.has_secrets }}" == "true" ]]; then
+          DEPLOY_CMD="${DEPLOY_CMD} --env-vars-file=/tmp/env-vars.env"
+        fi
+
+        # Execute deploy
+        eval $DEPLOY_CMD
+
+        # Cleanup
+        if [[ -f /tmp/env-vars.env ]]; then
+          rm /tmp/env-vars.env
+        fi
+
+        echo "✅ Deploy completed with automatic source tracking"
+
+    - name: Verify deployment
+      run: |
+        SERVICE_URL=$(gcloud run services describe ${{ inputs.service_name }} \
+          --region ${{ inputs.region }} \
+          --project ${{ inputs.project_id }} \
+          --format="value(status.url)")
+
+        echo "🌐 Service URL: ${SERVICE_URL}"
+        echo "📋 Console: https://console.cloud.google.com/run/detail/${{ inputs.region }}/${{ inputs.service_name }}/source?project=${{ inputs.project_id }}"
