@@ -127,18 +127,6 @@ jobs:
 
     - name: Deploy to Cloud Run
       run: |
-        # Get build information for annotations
-        BUILD_ID="${{ steps.build.outputs.build_id }}"
-
-        # Get source location from the build
-        SOURCE_LOCATION=$(gcloud builds describe ${BUILD_ID} \
-          --project ${{ inputs.project_id }} \
-          --format="value(source.storageSource.bucket,source.storageSource.object,source.storageSource.generation)" \
-          | tr '\t' '/')
-
-        # Build annotations string
-        ANNOTATIONS="run.googleapis.com/build-id=${BUILD_ID},run.googleapis.com/build-source-location=gs://${SOURCE_LOCATION}"
-
         if [ "${{ inputs.use_secret_manager }}" = "true" ]; then
           SECRET_NAME="${{ inputs.service_name }}-${{ inputs.environment }}"
 
@@ -156,7 +144,6 @@ jobs:
               --project ${{ inputs.project_id }} \
               --timeout=${{ inputs.timeout }} \
               --env-vars-file /tmp/env-vars.json \
-              --update-annotations="${ANNOTATIONS}" \
               --quiet
 
             rm /tmp/env-vars.json
@@ -167,7 +154,6 @@ jobs:
               --region ${{ inputs.region }} \
               --project ${{ inputs.project_id }} \
               --timeout=${{ inputs.timeout }} \
-              --update-annotations="${ANNOTATIONS}" \
               --quiet
           fi
         else
@@ -177,10 +163,44 @@ jobs:
             --region ${{ inputs.region }} \
             --project ${{ inputs.project_id }} \
             --timeout=${{ inputs.timeout }} \
-            --update-annotations="${ANNOTATIONS}" \
             --quiet
         fi
 
-        echo "✅ Deploy completed with build source tracking"
+        echo "✅ Deploy completed"
+
+    - name: Add build source annotations to revision template
+      if: steps.build.outputs.build_id != ''
+      run: |
+        BUILD_ID="${{ steps.build.outputs.build_id }}"
+
+        # Get source location from the build
+        SOURCE_LOCATION=$(gcloud builds describe ${BUILD_ID} \
+          --project ${{ inputs.project_id }} \
+          --format="value(source.storageSource.bucket,source.storageSource.object,source.storageSource.generation)" \
+          | tr '\t' '/')
+
+        echo "📝 Adding build source annotations to revision template..."
         echo "   Build ID: ${BUILD_ID}"
         echo "   Source: gs://${SOURCE_LOCATION}"
+
+        # Export current service configuration
+        gcloud run services describe ${{ inputs.service_name }} \
+          --region ${{ inputs.region }} \
+          --project ${{ inputs.project_id }} \
+          --format=export > /tmp/service-config.yaml
+
+        # Add build annotations to template using sed
+        sed -i "/template:/,/spec:/ {
+          /annotations:/a\        run.googleapis.com/build-id: ${BUILD_ID}
+          /annotations:/a\        run.googleapis.com/build-source-location: gs://${SOURCE_LOCATION}
+        }" /tmp/service-config.yaml
+
+        # Apply the updated configuration
+        gcloud run services replace /tmp/service-config.yaml \
+          --region ${{ inputs.region }} \
+          --project ${{ inputs.project_id }} \
+          --quiet
+
+        rm /tmp/service-config.yaml
+
+        echo "✅ Build source annotations added to revision template"
