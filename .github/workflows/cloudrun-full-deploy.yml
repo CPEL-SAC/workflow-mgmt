@@ -85,12 +85,29 @@ jobs:
           --config=/tmp/cloudbuild.yaml \
           --project ${{ inputs.project_id }} \
           --timeout=600 \
+          --async \
           --format="value(id)")
 
         rm /tmp/cloudbuild.yaml
 
         echo "build_id=${BUILD_ID}" >> $GITHUB_OUTPUT
-        echo "✅ Build completed with ID: ${BUILD_ID}"
+        echo "🔨 Build started with ID: ${BUILD_ID}"
+
+        # Wait for build to complete
+        echo "⏳ Waiting for build to complete..."
+        gcloud builds log --stream ${BUILD_ID} --project ${{ inputs.project_id }} || true
+
+        # Check build status
+        BUILD_STATUS=$(gcloud builds describe ${BUILD_ID} \
+          --project ${{ inputs.project_id }} \
+          --format="value(status)")
+
+        if [[ "${BUILD_STATUS}" != "SUCCESS" ]]; then
+          echo "❌ Build failed with status: ${BUILD_STATUS}"
+          exit 1
+        fi
+
+        echo "✅ Build completed successfully with ID: ${BUILD_ID}"
 
     - name: Deploy to Cloud Run
       run: |
