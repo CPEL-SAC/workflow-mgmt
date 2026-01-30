@@ -1,0 +1,204 @@
+name: Deploy to GKE (GitOps)
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      project_id:
+        required: true
+        type: string
+      region:
+        required: false
+        type: string
+        default: 'us-central1'
+      gke_cluster:
+        required: true
+        type: string
+      gke_zone:
+        required: false
+        type: string
+        default: 'us-central1'
+      manifests_repo:
+        required: true
+        type: string
+      manifests_path:
+        required: true
+        type: string
+      namespace:
+        required: false
+        type: string
+        default: 'default'
+    secrets:
+      gcp_credentials:
+        required: true
+      manifests_pat:
+        required: true
+
+jobs:
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      full_image: ${{ steps.meta.outputs.full_image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.gcp_credentials }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          VERSION="${SHORT_SHA}-${TIMESTAMP}"
+          FULL_IMAGE="${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.service_name }}/${{ inputs.service_name }}:${VERSION}"
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
+          echo "📦 Image: ${FULL_IMAGE}"
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --file dockerfile \
+            --tag ${{ steps.meta.outputs.full_image }} \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            .
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ steps.meta.outputs.full_image }}
+
+          docker tag ${{ steps.meta.outputs.full_image }} \
+            ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.service_name }}/${{ inputs.service_name }}:latest
+          docker push ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.service_name }}/${{ inputs.service_name }}:latest
+
+          echo "✅ Image pushed successfully"
+
+  update-manifests:
+    name: Update Manifests (GitOps)
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Checkout manifests repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.manifests_repo }}
+          token: ${{ secrets.manifests_pat }}
+          path: manifests
+
+      - name: Update image tag in deployment
+        working-directory: manifests/${{ inputs.manifests_path }}
+        run: |
+          NEW_IMAGE="${{ needs.build-and-push.outputs.full_image }}"
+
+          echo "🔄 Updating image to: ${NEW_IMAGE}"
+
+          sed -i "s|image: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.service_name }}/${{ inputs.service_name }}:.*|image: ${NEW_IMAGE}|g" deployment.yaml
+
+          echo "📄 Updated deployment.yaml:"
+          grep "image:" deployment.yaml
+
+      - name: Commit and push manifest changes
+        working-directory: manifests
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+
+          git add .
+
+          if git diff --staged --quiet; then
+            echo "⚠️ No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "chore(${{ inputs.service_name }}): update image to ${{ needs.build-and-push.outputs.image_tag }}
+
+          Source commit: ${{ github.sha }}
+          Triggered by: ${{ github.actor }}
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          git push origin main
+
+          echo "✅ Manifests repository updated"
+
+  deploy-to-gke:
+    name: Deploy to GKE
+    runs-on: ubuntu-latest
+    needs: [build-and-push, update-manifests]
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.gcp_credentials }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install gke-gcloud-auth-plugin
+        run: |
+          gcloud components install gke-gcloud-auth-plugin --quiet
+
+      - name: Configure kubectl
+        run: |
+          gcloud container clusters get-credentials ${{ inputs.gke_cluster }} \
+            --region ${{ inputs.gke_zone }} \
+            --project ${{ inputs.project_id }}
+
+      - name: Checkout manifests repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.manifests_repo }}
+          token: ${{ secrets.manifests_pat }}
+          ref: main
+          path: manifests
+
+      - name: Apply manifests to GKE
+        working-directory: manifests/${{ inputs.manifests_path }}
+        run: |
+          echo "🚀 Applying manifests to GKE cluster..."
+
+          kubectl apply -f deployment.yaml
+
+          echo "⏳ Waiting for rollout to complete..."
+          kubectl rollout status deployment/${{ inputs.service_name }} -n ${{ inputs.namespace }} --timeout=300s
+
+          echo "✅ Deployment completed successfully"
+
+      - name: Verify deployment
+        run: |
+          echo "📋 Deployment status:"
+          kubectl get deployment ${{ inputs.service_name }} -n ${{ inputs.namespace }} -o wide
+
+          echo ""
+          echo "📋 Pods status:"
+          kubectl get pods -n ${{ inputs.namespace }} -l app=${{ inputs.service_name }} -o wide
+
+      - name: Summary
+        run: |
+          echo "## 🚀 GKE Deploy Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image** | \`${{ needs.build-and-push.outputs.full_image }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Cluster** | ${{ inputs.gke_cluster }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Namespace** | ${{ inputs.namespace }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Manifests Repo** | ${{ inputs.manifests_repo }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Triggered by** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
