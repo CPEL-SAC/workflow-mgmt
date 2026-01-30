@@ -170,8 +170,8 @@ jobs:
 
           kubectl apply -f deployment.yaml
 
-          # Get namespace from deployment.yaml
-          NAMESPACE=$(grep -A1 "^metadata:" deployment.yaml | grep "namespace:" | awk '{print $2}')
+          # Get namespace from deployment.yaml (search in metadata section)
+          NAMESPACE=$(grep "^  namespace:" deployment.yaml | head -1 | awk '{print $2}')
           if [ -z "$NAMESPACE" ]; then
             NAMESPACE="default"
           fi
@@ -184,7 +184,7 @@ jobs:
       - name: Verify deployment
         working-directory: manifests/${{ inputs.project_id }}/${{ inputs.service_name }}
         run: |
-          NAMESPACE=$(grep -A1 "^metadata:" deployment.yaml | grep "namespace:" | awk '{print $2}')
+          NAMESPACE=$(grep "^  namespace:" deployment.yaml | head -1 | awk '{print $2}')
           if [ -z "$NAMESPACE" ]; then
             NAMESPACE="default"
           fi
