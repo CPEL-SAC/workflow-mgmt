@@ -238,35 +238,43 @@ jobs:
           echo "| **Triggered by** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
 
       - name: Notify Slack on Success
-        if: success() && secrets.slack_webhook_url != ''
+        if: success()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
         run: |
-          curl -X POST ${{ secrets.slack_webhook_url }} \
-            -H 'Content-type: application/json' \
-            -d '{
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "✅ *GKE Deploy Exitoso*\n*Service:* ${{ inputs.service_name }}\n*Cluster:* ${{ inputs.gke_cluster }}\n*Project:* ${{ inputs.project_id }}\n*Image:* ${{ needs.build-and-push.outputs.image_tag }}\n*Actor:* ${{ github.actor }}"
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
+              -d '{
+                "blocks": [
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "✅ *GKE Deploy Exitoso*\n*Service:* ${{ inputs.service_name }}\n*Cluster:* ${{ inputs.gke_cluster }}\n*Project:* ${{ inputs.project_id }}\n*Image:* ${{ needs.build-and-push.outputs.image_tag }}\n*Actor:* ${{ github.actor }}"
+                    }
                   }
-                }
-              ]
-            }'
+                ]
+              }'
+          fi
 
       - name: Notify Slack on Failure
-        if: failure() && secrets.slack_webhook_url != ''
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
         run: |
-          curl -X POST ${{ secrets.slack_webhook_url }} \
-            -H 'Content-type: application/json' \
-            -d '{
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "❌ *GKE Deploy Fallido*\n*Service:* ${{ inputs.service_name }}\n*Cluster:* ${{ inputs.gke_cluster }}\n*Project:* ${{ inputs.project_id }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
+              -d '{
+                "blocks": [
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "❌ *GKE Deploy Fallido*\n*Service:* ${{ inputs.service_name }}\n*Cluster:* ${{ inputs.gke_cluster }}\n*Project:* ${{ inputs.project_id }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
+                    }
                   }
-                }
-              ]
-            }'
+                ]
+              }'
+          fi

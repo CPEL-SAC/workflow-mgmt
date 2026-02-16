@@ -105,35 +105,43 @@ jobs:
         echo "📋 Console: https://console.cloud.google.com/run/detail/${{ inputs.region }}/${{ inputs.service_name }}/source?project=${{ inputs.project_id }}"
 
     - name: Notify Slack on Success
-      if: success() && secrets.slack_webhook_url != ''
+      if: success()
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
       run: |
-        curl -X POST ${{ secrets.slack_webhook_url }} \
-          -H 'Content-type: application/json' \
-          -d '{
-            "blocks": [
-              {
-                "type": "section",
-                "text": {
-                  "type": "mrkdwn",
-                  "text": "✅ *Cloud Run Deploy Exitoso*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Environment:* ${{ inputs.environment }}\n*Actor:* ${{ github.actor }}"
+        if [ -n "$SLACK_WEBHOOK_URL" ]; then
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d '{
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *Cloud Run Deploy Exitoso*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Environment:* ${{ inputs.environment }}\n*Actor:* ${{ github.actor }}"
+                  }
                 }
-              }
-            ]
-          }'
+              ]
+            }'
+        fi
 
     - name: Notify Slack on Failure
-      if: failure() && secrets.slack_webhook_url != ''
+      if: failure()
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
       run: |
-        curl -X POST ${{ secrets.slack_webhook_url }} \
-          -H 'Content-type: application/json' \
-          -d '{
-            "blocks": [
-              {
-                "type": "section",
-                "text": {
-                  "type": "mrkdwn",
-                  "text": "❌ *Cloud Run Deploy Fallido*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Environment:* ${{ inputs.environment }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
+        if [ -n "$SLACK_WEBHOOK_URL" ]; then
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d '{
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *Cloud Run Deploy Fallido*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Environment:* ${{ inputs.environment }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
+                  }
                 }
-              }
-            ]
-          }'
+              ]
+            }'
+        fi
