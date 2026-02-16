@@ -25,6 +25,8 @@ on:
         required: true
       manifests_pat:
         required: true
+      slack_webhook_url:
+        required: false
 
 env:
   MANIFESTS_REPO: CPEL-SAC/manifiestos-kubernetes
@@ -234,3 +236,37 @@ jobs:
           echo "| **Cluster** | ${{ inputs.gke_cluster }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Manifests Path** | ${{ inputs.project_id }}/${{ inputs.service_name }}/k8s |" >> $GITHUB_STEP_SUMMARY
           echo "| **Triggered by** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify Slack on Success
+        if: success() && secrets.slack_webhook_url != ''
+        run: |
+          curl -X POST ${{ secrets.slack_webhook_url }} \
+            -H 'Content-type: application/json' \
+            -d '{
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *GKE Deploy Exitoso*\n*Service:* ${{ inputs.service_name }}\n*Cluster:* ${{ inputs.gke_cluster }}\n*Project:* ${{ inputs.project_id }}\n*Image:* ${{ needs.build-and-push.outputs.image_tag }}\n*Actor:* ${{ github.actor }}"
+                  }
+                }
+              ]
+            }'
+
+      - name: Notify Slack on Failure
+        if: failure() && secrets.slack_webhook_url != ''
+        run: |
+          curl -X POST ${{ secrets.slack_webhook_url }} \
+            -H 'Content-type: application/json' \
+            -d '{
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *GKE Deploy Fallido*\n*Service:* ${{ inputs.service_name }}\n*Cluster:* ${{ inputs.gke_cluster }}\n*Project:* ${{ inputs.project_id }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
+                  }
+                }
+              ]
+            }'
