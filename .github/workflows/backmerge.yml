@@ -36,7 +36,7 @@ on:
         type: string
         required: true
     secrets:
-      github_token:
+      repo_token:
         required: true
       slack_webhook_url:
         required: false
@@ -50,7 +50,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.github_token }}
+          token: ${{ secrets.repo_token }}
 
       - name: Configure Git
         run: |
@@ -60,7 +60,7 @@ jobs:
       - name: Back-merge master to target branch
         id: backmerge
         env:
-          GITHUB_TOKEN: ${{ secrets.github_token }}
+          GITHUB_TOKEN: ${{ secrets.repo_token }}
           PR_BRANCH: ${{ inputs.pr_branch }}
           PR_NUMBER: ${{ inputs.pr_number }}
           TARGET_BRANCH: ${{ inputs.target_branch }}
