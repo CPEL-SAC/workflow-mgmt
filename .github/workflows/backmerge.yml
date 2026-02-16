@@ -1,0 +1,246 @@
+name: Back-merge Reusable
+
+on:
+  workflow_call:
+    inputs:
+      target_branch:
+        description: 'Branch destino del backmerge'
+        type: string
+        default: 'develop'
+      validate_syntax:
+        description: 'Validar sintaxis antes de push'
+        type: boolean
+        default: true
+      syntax_pattern:
+        description: 'Patrón de archivos a validar (ej: *.js, *.ts)'
+        type: string
+        default: '*.js'
+      src_path:
+        description: 'Directorio donde buscar archivos'
+        type: string
+        default: 'src'
+      pr_number:
+        description: 'Número del PR que disparó el backmerge'
+        type: string
+        required: true
+      pr_title:
+        description: 'Título del PR'
+        type: string
+        required: true
+      pr_branch:
+        description: 'Branch del PR'
+        type: string
+        required: true
+      pr_url:
+        description: 'URL del PR'
+        type: string
+        required: true
+    secrets:
+      github_token:
+        required: true
+      slack_webhook_url:
+        required: false
+
+jobs:
+  backmerge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.github_token }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Back-merge master to target branch
+        id: backmerge
+        env:
+          GITHUB_TOKEN: ${{ secrets.github_token }}
+          PR_BRANCH: ${{ inputs.pr_branch }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          VALIDATE_SYNTAX: ${{ inputs.validate_syntax }}
+          SYNTAX_PATTERN: ${{ inputs.syntax_pattern }}
+          SRC_PATH: ${{ inputs.src_path }}
+        run: |
+          git fetch origin
+          git checkout ${TARGET_BRANCH}
+          git pull origin ${TARGET_BRANCH}
+
+          if git merge origin/master --no-ff -m "chore: auto back-merge ${PR_BRANCH} from master to ${TARGET_BRANCH}"; then
+            echo "Merge successful"
+
+            # Validar sintaxis si está habilitado
+            if [ "$VALIDATE_SYNTAX" = "true" ]; then
+              echo "Validating syntax..."
+              SYNTAX_ERROR=false
+              SYNTAX_FILES=""
+
+              for file in $(find ${SRC_PATH} -name "${SYNTAX_PATTERN}" -type f 2>/dev/null); do
+                if ! node --check "$file" 2>/dev/null; then
+                  echo "Syntax error in: $file"
+                  node --check "$file" 2>&1 || true
+                  SYNTAX_ERROR=true
+                  SYNTAX_FILES="${SYNTAX_FILES}${file}\n"
+                fi
+              done
+
+              if [ "$SYNTAX_ERROR" = true ]; then
+                echo "Syntax errors detected. Creating PR for manual resolution."
+                echo "result=syntax_error" >> $GITHUB_OUTPUT
+                echo "syntax_files=${SYNTAX_FILES}" >> $GITHUB_OUTPUT
+
+                TEMP_BRANCH="backmerge/${PR_BRANCH}-syntax-fix"
+                git checkout -b $TEMP_BRANCH
+                git push -u origin $TEMP_BRANCH
+
+                PR_URL=$(gh pr create --base ${TARGET_BRANCH} --head $TEMP_BRANCH \
+                  --title "Back-merge: ${PR_BRANCH} (syntax errors)" \
+                  --body "## Syntax Errors Detected\n\nThis PR was automatically created because syntax errors were found after merging.\n\n**Manual intervention required** - please fix the syntax errors before merging.\n\n### Details\n- Original PR: #${PR_NUMBER}\n- Branch: ${PR_BRANCH}\n- Source: master to ${TARGET_BRANCH}\n\n---\nAutomated back-merge via GitHub Actions")
+
+                echo "pr_url=${PR_URL}" >> $GITHUB_OUTPUT
+                echo "PR created for manual syntax fix"
+                exit 0
+              fi
+            fi
+
+            echo "Pushing to ${TARGET_BRANCH}"
+            echo "result=success" >> $GITHUB_OUTPUT
+            git push origin ${TARGET_BRANCH}
+          else
+            echo "Merge conflicts detected. Creating PR for manual resolution."
+            echo "result=conflict" >> $GITHUB_OUTPUT
+            git merge --abort
+
+            TEMP_BRANCH="backmerge/${PR_BRANCH}-to-${TARGET_BRANCH}"
+            git checkout -b $TEMP_BRANCH
+            git merge origin/master --no-ff --no-commit || true
+
+            if git diff --name-only --diff-filter=U | grep -q .; then
+              echo "Conflicts found in:"
+              CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
+              echo "$CONFLICT_FILES"
+              echo "conflict_files=${CONFLICT_FILES}" >> $GITHUB_OUTPUT
+
+              git add -A
+              git commit -m "chore: back-merge ${PR_BRANCH} from master to ${TARGET_BRANCH} (with conflicts)"
+              git push -u origin $TEMP_BRANCH
+
+              PR_URL=$(gh pr create --base ${TARGET_BRANCH} --head $TEMP_BRANCH \
+                --title "Back-merge: ${PR_BRANCH}" \
+                --body "## Merge Conflicts Detected\n\nThis PR was automatically created to back-merge changes from master to ${TARGET_BRANCH}.\n\n**Manual intervention required** - there are merge conflicts that need to be resolved.\n\n### Details\n- Original PR: #${PR_NUMBER}\n- Branch: ${PR_BRANCH}\n- Source: master to ${TARGET_BRANCH}\n\n### Next Steps\n1. Review the conflicts in this PR\n2. Resolve conflicts manually\n3. Merge this PR to ${TARGET_BRANCH}\n\n---\nAutomated back-merge via GitHub Actions")
+
+              echo "pr_url=${PR_URL}" >> $GITHUB_OUTPUT
+              echo "PR created for manual conflict resolution"
+            fi
+          fi
+
+      - name: Notify Slack on Success
+        if: steps.backmerge.outputs.result == 'success'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+          PR_TITLE: ${{ inputs.pr_title }}
+          PR_BRANCH: ${{ inputs.pr_branch }}
+          PR_URL: ${{ inputs.pr_url }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
+              -d "{
+                \"blocks\": [
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"✅ *Back-merge Completado*\n\n*Repositorio:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Branch:* ${PR_BRANCH}\n*Destino:* ${TARGET_BRANCH}\n*Acción:* Los cambios de master fueron sincronizados a ${TARGET_BRANCH} automáticamente\n*Actor:* ${{ github.actor }}\"
+                    }
+                  }
+                ]
+              }"
+          fi
+
+      - name: Notify Slack on Syntax Error
+        if: steps.backmerge.outputs.result == 'syntax_error'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+          PR_TITLE: ${{ inputs.pr_title }}
+          PR_URL: ${{ inputs.pr_url }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          CREATED_PR_URL: ${{ steps.backmerge.outputs.pr_url }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
+              -d "{
+                \"blocks\": [
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"⚠️ *Back-merge Requiere Revisión Manual*\n\n*Repositorio:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Problema:* Se detectaron errores de sintaxis en el código después del merge\n*PR creado para resolver:* ${CREATED_PR_URL}\n*Acción requerida:* Revisar y corregir los errores de sintaxis antes de hacer merge del PR\n*Actor:* ${{ github.actor }}\"
+                    }
+                  }
+                ]
+              }"
+          fi
+
+      - name: Notify Slack on Conflict
+        if: steps.backmerge.outputs.result == 'conflict'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+          PR_TITLE: ${{ inputs.pr_title }}
+          PR_URL: ${{ inputs.pr_url }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          CREATED_PR_URL: ${{ steps.backmerge.outputs.pr_url }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
+              -d "{
+                \"blocks\": [
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"⚠️ *Back-merge Con Conflictos*\n\n*Repositorio:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Problema:* Hay conflictos de merge entre master y ${{ inputs.target_branch }}\n*PR creado para resolver:* ${CREATED_PR_URL}\n*Acción requerida:* Resolver los conflictos manualmente y hacer merge del PR\n*Actor:* ${{ github.actor }}\"
+                    }
+                  }
+                ]
+              }"
+          fi
+
+      - name: Notify Slack on Failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+          PR_TITLE: ${{ inputs.pr_title }}
+          PR_BRANCH: ${{ inputs.pr_branch }}
+          PR_URL: ${{ inputs.pr_url }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
+              -d "{
+                \"blocks\": [
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \"❌ *Back-merge Falló*\n\n*Repositorio:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Branch:* ${PR_BRANCH}\n*Error:* El workflow de back-merge falló inesperadamente\n*Acción requerida:* Revisar los logs y hacer el merge manual de master a ${TARGET_BRANCH}\n*Logs:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver detalles>\n*Actor:* ${{ github.actor }}\"
+                    }
+                  }
+                ]
+              }"
+          fi
+          echo "Back-merge failed! Manual intervention required."
+          echo "Branch: ${PR_BRANCH}"
+          echo "Please manually merge master into ${TARGET_BRANCH}."
