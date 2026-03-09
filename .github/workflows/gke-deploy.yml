@@ -98,7 +98,7 @@ jobs:
           token: ${{ secrets.manifests_pat }}
           path: manifests
 
-      - name: Update image tag in deployment
+      - name: Update image tag in deployments
         working-directory: manifests/${{ inputs.project_id }}/${{ inputs.service_name }}/k8s
         run: |
           NEW_IMAGE="${{ needs.build-and-push.outputs.full_image }}"
@@ -108,6 +108,12 @@ jobs:
           sed -i "s|image: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.service_name }}/${{ inputs.service_name }}:.*|image: ${NEW_IMAGE}|g" deployment.yaml
           echo "📄 Updated deployment.yaml:"
           grep "image:" deployment.yaml
+
+          if [ -f "deployment-job.yaml" ]; then
+            sed -i "s|image: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.service_name }}/${{ inputs.service_name }}:.*|image: ${NEW_IMAGE}|g" deployment-job.yaml
+            echo "📄 Updated deployment-job.yaml:"
+            grep "image:" deployment-job.yaml
+          fi
 
       - name: Commit and push manifest changes
         working-directory: manifests
@@ -182,6 +188,12 @@ jobs:
           echo "⏳ Waiting for rollout of ${{ inputs.service_name }}..."
           kubectl rollout status deployment/${{ inputs.service_name }} -n ${NAMESPACE} --timeout=300s
 
+          if [ -f "deployment-job.yaml" ]; then
+            kubectl apply -f deployment-job.yaml
+            echo "⏳ Waiting for rollout of ${{ inputs.service_name }}-jobs..."
+            kubectl rollout status deployment/${{ inputs.service_name }}-jobs -n ${NAMESPACE} --timeout=300s
+          fi
+
           echo "✅ Deployment completed successfully"
 
       - name: Verify deployment
@@ -198,6 +210,16 @@ jobs:
           echo ""
           echo "📋 Pods status (${{ inputs.service_name }}):"
           kubectl get pods -n ${NAMESPACE} -l app=${{ inputs.service_name }} -o wide
+
+          if [ -f "deployment-job.yaml" ]; then
+            echo ""
+            echo "📋 Deployment status (${{ inputs.service_name }}-jobs):"
+            kubectl get deployment ${{ inputs.service_name }}-jobs -n ${NAMESPACE} -o wide
+
+            echo ""
+            echo "📋 Pods status (${{ inputs.service_name }}-jobs):"
+            kubectl get pods -n ${NAMESPACE} -l app=${{ inputs.service_name }}-jobs -o wide
+          fi
 
       - name: Summary
         run: |
