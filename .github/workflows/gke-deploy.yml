@@ -20,6 +20,10 @@ on:
         required: false
         type: string
         default: 'us-central1'
+      sync_deployment:
+        required: false
+        type: boolean
+        default: false
     secrets:
       gcp_credentials:
         required: true
@@ -105,12 +109,20 @@ jobs:
 
           echo "🔄 Updating image to: ${NEW_IMAGE}"
 
-          sed -i "s|image: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.service_name }}/${{ inputs.service_name }}:.*|image: ${NEW_IMAGE}|g" deployment.yaml
+          PATTERN="image: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.service_name }}/${{ inputs.service_name }}:.*"
+
+          sed -i "s|${PATTERN}|image: ${NEW_IMAGE}|g" deployment.yaml
           echo "📄 Updated deployment.yaml:"
           grep "image:" deployment.yaml
 
+          if [ "${{ inputs.sync_deployment }}" = "true" ]; then
+            sed -i "s|${PATTERN}|image: ${NEW_IMAGE}|g" deployment-sync.yaml
+            echo "📄 Updated deployment-sync.yaml:"
+            grep "image:" deployment-sync.yaml
+          fi
+
           if [ -f "deployment-job.yaml" ]; then
-            sed -i "s|image: ${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.service_name }}/${{ inputs.service_name }}:.*|image: ${NEW_IMAGE}|g" deployment-job.yaml
+            sed -i "s|${PATTERN}|image: ${NEW_IMAGE}|g" deployment-job.yaml
             echo "📄 Updated deployment-job.yaml:"
             grep "image:" deployment-job.yaml
           fi
@@ -184,9 +196,20 @@ jobs:
             echo "⚠️ No namespace found, using default"
           fi
 
+          DEPLOY_NAME=$(grep "^  name:" deployment.yaml | head -1 | awk '{print $2}')
+          echo "📦 Deployment name: ${DEPLOY_NAME}"
+
           kubectl apply -f deployment.yaml
-          echo "⏳ Waiting for rollout of ${{ inputs.service_name }}..."
-          kubectl rollout status deployment/${{ inputs.service_name }} -n ${NAMESPACE} --timeout=300s
+          echo "⏳ Waiting for rollout of ${DEPLOY_NAME}..."
+          kubectl rollout status deployment/${DEPLOY_NAME} -n ${NAMESPACE} --timeout=300s
+
+          if [ "${{ inputs.sync_deployment }}" = "true" ]; then
+            SYNC_DEPLOY_NAME=$(grep "^  name:" deployment-sync.yaml | head -1 | awk '{print $2}')
+            echo "📦 Sync deployment name: ${SYNC_DEPLOY_NAME}"
+            kubectl apply -f deployment-sync.yaml
+            echo "⏳ Waiting for rollout of ${SYNC_DEPLOY_NAME}..."
+            kubectl rollout status deployment/${SYNC_DEPLOY_NAME} -n ${NAMESPACE} --timeout=300s
+          fi
 
           if [ -f "deployment-job.yaml" ]; then
             kubectl apply -f deployment-job.yaml
@@ -204,12 +227,25 @@ jobs:
             NAMESPACE="default"
           fi
 
-          echo "📋 Deployment status (${{ inputs.service_name }}):"
-          kubectl get deployment ${{ inputs.service_name }} -n ${NAMESPACE} -o wide
+          DEPLOY_NAME=$(grep "^  name:" deployment.yaml | head -1 | awk '{print $2}')
+
+          echo "📋 Deployment status (${DEPLOY_NAME}):"
+          kubectl get deployment ${DEPLOY_NAME} -n ${NAMESPACE} -o wide
 
           echo ""
-          echo "📋 Pods status (${{ inputs.service_name }}):"
-          kubectl get pods -n ${NAMESPACE} -l app=${{ inputs.service_name }} -o wide
+          echo "📋 Pods status (${DEPLOY_NAME}):"
+          kubectl get pods -n ${NAMESPACE} -l app=${DEPLOY_NAME} -o wide
+
+          if [ "${{ inputs.sync_deployment }}" = "true" ]; then
+            SYNC_DEPLOY_NAME=$(grep "^  name:" deployment-sync.yaml | head -1 | awk '{print $2}')
+            echo ""
+            echo "📋 Deployment status (${SYNC_DEPLOY_NAME}):"
+            kubectl get deployment ${SYNC_DEPLOY_NAME} -n ${NAMESPACE} -o wide
+
+            echo ""
+            echo "📋 Pods status (${SYNC_DEPLOY_NAME}):"
+            kubectl get pods -n ${NAMESPACE} -l app=${SYNC_DEPLOY_NAME} -o wide
+          fi
 
           if [ -f "deployment-job.yaml" ]; then
             echo ""
