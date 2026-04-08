@@ -220,7 +220,7 @@ jobs:
             --auth-token "${ARGOCD_TOKEN}" \
             --grpc-web \
             --health \
-            --timeout 300
+            --timeout 900
 
           echo "✅ ArgoCD sync completed"
 
