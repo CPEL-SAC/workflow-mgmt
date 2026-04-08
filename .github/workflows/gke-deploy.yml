@@ -24,12 +24,18 @@ on:
         required: false
         type: boolean
         default: false
+      argocd_server:
+        required: false
+        type: string
+        default: 'argo.thecosmosproject.com'
     secrets:
       gcp_credentials:
         required: true
       manifests_pat:
         required: true
       slack_webhook_url:
+        required: false
+      argocd_token:
         required: false
 
 env:
@@ -156,25 +162,107 @@ jobs:
     needs: [build-and-push, update-manifests]
 
     steps:
+      - name: Check ArgoCD app exists
+        id: argocd_check
+        env:
+          ARGOCD_TOKEN: ${{ secrets.argocd_token }}
+          ARGOCD_SERVER: ${{ inputs.argocd_server }}
+        run: |
+          # Si no hay token → fallback kubectl
+          if [ -z "$ARGOCD_TOKEN" ]; then
+            echo "use_argocd=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ No ArgoCD token → using kubectl fallback"
+            exit 0
+          fi
+
+          # Instalar ArgoCD CLI
+          curl -sSL -o /usr/local/bin/argocd \
+            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x /usr/local/bin/argocd
+
+          # Verificar si existe la app {service_name}-prod
+          ARGOCD_APP="${{ inputs.service_name }}-prod"
+          echo "🔍 Checking ArgoCD app: ${ARGOCD_APP}"
+
+          if argocd app get "${ARGOCD_APP}" \
+              --server "${ARGOCD_SERVER}" \
+              --auth-token "${ARGOCD_TOKEN}" \
+              --grpc-web \
+              --plaintext=false 2>/dev/null; then
+            echo "use_argocd=true" >> $GITHUB_OUTPUT
+            echo "argocd_app=${ARGOCD_APP}" >> $GITHUB_OUTPUT
+            echo "✅ ArgoCD app found → using ArgoCD sync"
+          else
+            echo "use_argocd=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ ArgoCD app not found → using kubectl fallback"
+          fi
+
+      # ─── RUTA ARGOCD ───────────────────────────────────────────────
+      - name: Sync via ArgoCD
+        if: steps.argocd_check.outputs.use_argocd == 'true'
+        env:
+          ARGOCD_TOKEN: ${{ secrets.argocd_token }}
+          ARGOCD_SERVER: ${{ inputs.argocd_server }}
+        run: |
+          ARGOCD_APP="${{ steps.argocd_check.outputs.argocd_app }}"
+          echo "🚀 Syncing ArgoCD app: ${ARGOCD_APP}"
+
+          argocd app sync "${ARGOCD_APP}" \
+            --server "${ARGOCD_SERVER}" \
+            --auth-token "${ARGOCD_TOKEN}" \
+            --grpc-web \
+            --force \
+            --timeout 30
+
+          echo "⏳ Waiting for app to be Healthy..."
+          argocd app wait "${ARGOCD_APP}" \
+            --server "${ARGOCD_SERVER}" \
+            --auth-token "${ARGOCD_TOKEN}" \
+            --grpc-web \
+            --health \
+            --timeout 300
+
+          echo "✅ ArgoCD sync completed"
+
+      - name: Summary (ArgoCD)
+        if: steps.argocd_check.outputs.use_argocd == 'true'
+        run: |
+          echo "## 🚀 GKE Deploy Summary (via ArgoCD)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Image** | \`${{ needs.build-and-push.outputs.full_image }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **ArgoCD App** | ${{ steps.argocd_check.outputs.argocd_app }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **ArgoCD URL** | https://${{ inputs.argocd_server }}/applications/${{ steps.argocd_check.outputs.argocd_app }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Triggered by** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> Slack notification sent automatically by ArgoCD Notifications" >> $GITHUB_STEP_SUMMARY
+
+      # ─── RUTA FALLBACK KUBECTL ─────────────────────────────────────
       - name: Authenticate to Google Cloud
+        if: steps.argocd_check.outputs.use_argocd != 'true'
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.gcp_credentials }}
 
       - name: Set up Cloud SDK
+        if: steps.argocd_check.outputs.use_argocd != 'true'
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Install gke-gcloud-auth-plugin
+        if: steps.argocd_check.outputs.use_argocd != 'true'
         run: |
           gcloud components install gke-gcloud-auth-plugin --quiet
 
       - name: Configure kubectl
+        if: steps.argocd_check.outputs.use_argocd != 'true'
         run: |
           gcloud container clusters get-credentials ${{ inputs.gke_cluster }} \
             --region ${{ inputs.gke_zone }} \
             --project ${{ inputs.project_id }}
 
       - name: Checkout manifests repository
+        if: steps.argocd_check.outputs.use_argocd != 'true'
         uses: actions/checkout@v4
         with:
           repository: ${{ env.MANIFESTS_REPO }}
@@ -183,11 +271,11 @@ jobs:
           path: manifests
 
       - name: Apply manifests to GKE
+        if: steps.argocd_check.outputs.use_argocd != 'true'
         working-directory: manifests/${{ inputs.project_id }}/${{ inputs.service_name }}/k8s
         run: |
           echo "🚀 Applying manifests to GKE cluster..."
 
-          # Get namespace from deployment.yaml using simple grep
           NAMESPACE=$(grep "namespace:" deployment.yaml | head -1 | awk '{print $2}')
           echo "📍 Detected namespace: ${NAMESPACE}"
 
@@ -220,6 +308,7 @@ jobs:
           echo "✅ Deployment completed successfully"
 
       - name: Verify deployment
+        if: steps.argocd_check.outputs.use_argocd != 'true'
         working-directory: manifests/${{ inputs.project_id }}/${{ inputs.service_name }}/k8s
         run: |
           NAMESPACE=$(grep "namespace:" deployment.yaml | head -1 | awk '{print $2}')
@@ -257,7 +346,8 @@ jobs:
             kubectl get pods -n ${NAMESPACE} -l app=${{ inputs.service_name }}-jobs -o wide
           fi
 
-      - name: Summary
+      - name: Summary (kubectl)
+        if: steps.argocd_check.outputs.use_argocd != 'true'
         run: |
           echo "## 🚀 GKE Deploy Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -269,7 +359,7 @@ jobs:
           echo "| **Triggered by** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
 
       - name: Notify Slack on Success
-        if: success()
+        if: steps.argocd_check.outputs.use_argocd != 'true' && success()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
         run: |
