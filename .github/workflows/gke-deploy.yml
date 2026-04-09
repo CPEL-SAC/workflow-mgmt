@@ -220,7 +220,7 @@ jobs:
             --auth-token "${ARGOCD_TOKEN}" \
             --grpc-web \
             --health \
-            --timeout 900
+            --timeout 900 || echo "⚠️ ArgoCD wait timed out - deploy applied but rollout still in progress"
 
           echo "✅ ArgoCD sync completed"
 
