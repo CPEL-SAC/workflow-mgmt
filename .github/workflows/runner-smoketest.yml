@@ -1,0 +1,37 @@
+name: runner-smoketest
+# Smoke-test de los runners self-hosted oxiacore (ARC + gold-image).
+# Se dispara solo al hacer push a la rama ci/runner-smoketest. Borrar la rama tras validar.
+on:
+  push:
+    branches: [ci/runner-smoketest]
+  workflow_dispatch:
+
+jobs:
+  smoketest:
+    runs-on: oxiacore-runner
+    steps:
+      - name: Hola desde el runner
+        run: echo "hello desde el runner self-hosted de oxiacore 🎉"
+
+      - name: Identidad y SO (no-root, debian-slim)
+        run: |
+          echo "usuario: $(whoami)"
+          grep '^PRETTY_NAME' /etc/os-release
+
+      - name: Toolchain pre-instalado (gold-image)
+        run: |
+          set -e
+          echo "git:     $(git --version)"
+          echo "gh:      $(gh --version | head -1)"
+          echo "node:    $(node --version)"
+          echo "npm:     $(npm --version)"
+          echo "jq:      $(jq --version)"
+          echo "docker:  $(docker --version)"
+          echo "buildx:  $(docker buildx version)"
+          echo "kubectl: $(kubectl version --client -o yaml | grep gitVersion | head -1)"
+          echo "gcloud:  $(gcloud --version | head -1)"
+
+      - name: Workload Identity → GCP sin llaves
+        run: |
+          echo "Proyecto/identidad activa vía metadata de GKE:"
+          gcloud auth list --format='value(account)' || true
