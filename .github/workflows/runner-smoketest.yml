@@ -8,7 +8,7 @@ on:
 
 jobs:
   smoketest:
-    runs-on: oxiacore-runner
+    runs-on: oxiacore-gke-runner
     steps:
       - name: Hola desde el runner
         run: echo "hello desde el runner self-hosted de oxiacore 🎉"
