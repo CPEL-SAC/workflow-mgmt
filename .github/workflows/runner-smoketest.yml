@@ -4,7 +4,7 @@ on:
     branches: [ci/runner-smoketest]
   workflow_dispatch:
 jobs:
-  hosted-control:
-    runs-on: ubuntu-latest
+  selfhosted:
+    runs-on: oxiacore-gke-runner
     steps:
-      - run: echo "hosted ubuntu-latest OK"
+      - run: echo "self-hosted OK en $(hostname)"
