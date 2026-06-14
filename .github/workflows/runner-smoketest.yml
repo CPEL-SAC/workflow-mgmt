@@ -1,19 +1,10 @@
 name: runner-smoketest
-# Smoke-test de los runners self-hosted oxiacore (ARC + gold-image).
-# Se dispara solo al hacer push a la rama ci/runner-smoketest. Borrar la rama tras validar.
 on:
   push:
     branches: [ci/runner-smoketest]
   workflow_dispatch:
-
 jobs:
   hosted-control:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "control: hosted ubuntu-latest ejecuta OK"
-
-  selfhosted:
-    runs-on: oxiacore-gke-runner
-    steps:
-      - run: echo "hello desde el runner self-hosted de oxiacore 🎉"
-      - run: whoami; grep '^PRETTY_NAME' /etc/os-release || true
+      - run: echo "hosted ubuntu-latest OK"
