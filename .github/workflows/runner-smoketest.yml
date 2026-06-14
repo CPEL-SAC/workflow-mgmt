@@ -7,31 +7,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  smoketest:
+  hosted-control:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "control: hosted ubuntu-latest ejecuta OK"
+
+  selfhosted:
     runs-on: oxiacore-gke-runner
     steps:
-      - name: Hola desde el runner
-        run: echo "hello desde el runner self-hosted de oxiacore 🎉"
-
-      - name: Identidad y SO (no-root, debian-slim)
-        run: |
-          echo "usuario: $(whoami)"
-          grep '^PRETTY_NAME' /etc/os-release
-
-      - name: Toolchain pre-instalado (gold-image)
-        run: |
-          set -e
-          echo "git:     $(git --version)"
-          echo "gh:      $(gh --version | head -1)"
-          echo "node:    $(node --version)"
-          echo "npm:     $(npm --version)"
-          echo "jq:      $(jq --version)"
-          echo "docker:  $(docker --version)"
-          echo "buildx:  $(docker buildx version)"
-          echo "kubectl: $(kubectl version --client -o yaml | grep gitVersion | head -1)"
-          echo "gcloud:  $(gcloud --version | head -1)"
-
-      - name: Workload Identity → GCP sin llaves
-        run: |
-          echo "Proyecto/identidad activa vía metadata de GKE:"
-          gcloud auth list --format='value(account)' || true
+      - run: echo "hello desde el runner self-hosted de oxiacore 🎉"
+      - run: whoami; grep '^PRETTY_NAME' /etc/os-release || true
