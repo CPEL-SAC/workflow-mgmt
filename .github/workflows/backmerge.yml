@@ -45,6 +45,14 @@ jobs:
   backmerge:
     runs-on: ubuntu-latest
 
+    # Cola por repo+destino: si se mergean 2 PRs a master casi seguidos, el segundo
+    # back-merge ESPERA al primero en vez de correr en paralelo y pisarlo (lo que
+    # provocaba el push rechazado por non-fast-forward → "a veces hay que hacerlo manual").
+    # cancel-in-progress: false → encolar, NUNCA cancelar (no perder un back-merge).
+    concurrency:
+      group: backmerge-${{ github.repository }}-${{ inputs.target_branch }}
+      cancel-in-progress: false
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -56,6 +64,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # rerere: recordar la resolución de un conflicto para reaplicarla sola si reaparece.
+          git config rerere.enabled true
 
       - name: Back-merge master to target branch
         id: backmerge
@@ -110,8 +120,35 @@ jobs:
             fi
 
             echo "Pushing to ${TARGET_BRANCH}"
+            # Push con reintento: si ${TARGET_BRANCH} avanzó entre el merge y el push
+            # (otro back-merge o un push concurrente), re-incorporamos esos commits y
+            # reintentamos en vez de fallar y dejar develop atrás.
+            MAX_RETRIES=5
+            attempt=0
+            PUSHED=false
+            until [ "$attempt" -ge "$MAX_RETRIES" ]; do
+              if git push origin ${TARGET_BRANCH}; then
+                PUSHED=true
+                break
+              fi
+              attempt=$((attempt + 1))
+              echo "Push rechazado (intento ${attempt}/${MAX_RETRIES}); re-incorporando ${TARGET_BRANCH} remoto..."
+              git fetch origin ${TARGET_BRANCH}
+              if ! git merge origin/${TARGET_BRANCH} --no-edit; then
+                echo "::error::Conflicto al re-incorporar ${TARGET_BRANCH} durante el reintento de push."
+                git merge --abort || true
+                echo "result=push_conflict" >> $GITHUB_OUTPUT
+                exit 1
+              fi
+            done
+
+            if [ "$PUSHED" != true ]; then
+              echo "::error::No se pudo pushear a ${TARGET_BRANCH} tras ${MAX_RETRIES} intentos."
+              echo "result=push_failed" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+
             echo "result=success" >> $GITHUB_OUTPUT
-            git push origin ${TARGET_BRANCH}
           else
             echo "Merge conflicts detected. Creating PR for manual resolution."
             echo "result=conflict" >> $GITHUB_OUTPUT
