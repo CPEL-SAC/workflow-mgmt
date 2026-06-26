@@ -182,9 +182,10 @@ jobs:
           }
 
           # ── Lista de destinos: principal + extras, deduplicada ───────────
+          SEEN=""
           for TB in $TARGET_BRANCH $EXTRA_BRANCHES; do
             case " $SEEN " in *" $TB "*) continue;; esac
-            SEEN="${SEEN:-} $TB"
+            SEEN="$SEEN $TB"
             backmerge_one "$TB" || true
           done
 
