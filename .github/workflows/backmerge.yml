@@ -1,12 +1,27 @@
 name: Back-merge Reusable
 
+# Back-merge automático disparado por PR mergeado a master.
+# FAN-OUT: baja los cambios de master a CADA rama destino de forma independiente
+# (master→develop y master→test). Cada destino se mergea desde master por separado,
+# así un conflicto en una rama no bloquea a la otra. Las ramas que no existan se saltan.
+#
+# Robustez: concurrency con cola (no se pisan dos back-merge), push con reintento
+# ante non-fast-forward, y rerere para reaplicar resoluciones de conflicto repetidas.
+#
+# Compatibilidad: los callers existentes pasan solo `target_branch: develop`; el input
+# `extra_branches` (default 'test') agrega el segundo destino sin tocar los callers.
+
 on:
   workflow_call:
     inputs:
       target_branch:
-        description: 'Branch destino del backmerge'
+        description: 'Branch destino principal del backmerge'
         type: string
         default: 'develop'
+      extra_branches:
+        description: 'Ramas destino adicionales (separadas por espacio), se saltan si no existen'
+        type: string
+        default: 'test'
       validate_syntax:
         description: 'Validar sintaxis antes de push'
         type: boolean
@@ -45,12 +60,12 @@ jobs:
   backmerge:
     runs-on: ubuntu-latest
 
-    # Cola por repo+destino: si se mergean 2 PRs a master casi seguidos, el segundo
-    # back-merge ESPERA al primero en vez de correr en paralelo y pisarlo (lo que
-    # provocaba el push rechazado por non-fast-forward → "a veces hay que hacerlo manual").
+    # Cola por repo: si se mergean 2 PRs a master casi seguidos, el segundo back-merge
+    # ESPERA al primero en vez de correr en paralelo y pisarlo (push rechazado por
+    # non-fast-forward → "a veces hay que hacerlo manual").
     # cancel-in-progress: false → encolar, NUNCA cancelar (no perder un back-merge).
     concurrency:
-      group: backmerge-${{ github.repository }}-${{ inputs.target_branch }}
+      group: backmerge-${{ github.repository }}
       cancel-in-progress: false
 
     steps:
@@ -67,114 +82,124 @@ jobs:
           # rerere: recordar la resolución de un conflicto para reaplicarla sola si reaparece.
           git config rerere.enabled true
 
-      - name: Back-merge master to target branch
+      - name: Back-merge master to target branches (fan-out)
         id: backmerge
         env:
           GITHUB_TOKEN: ${{ secrets.repo_token }}
           PR_BRANCH: ${{ inputs.pr_branch }}
           PR_NUMBER: ${{ inputs.pr_number }}
           TARGET_BRANCH: ${{ inputs.target_branch }}
+          EXTRA_BRANCHES: ${{ inputs.extra_branches }}
           VALIDATE_SYNTAX: ${{ inputs.validate_syntax }}
           SYNTAX_PATTERN: ${{ inputs.syntax_pattern }}
           SRC_PATH: ${{ inputs.src_path }}
         run: |
-          git fetch origin
-          git checkout ${TARGET_BRANCH}
-          git pull origin ${TARGET_BRANCH}
+          set -uo pipefail
+          git fetch origin --prune
 
-          if git merge origin/master --no-ff -m "chore: auto back-merge ${PR_BRANCH} from master to ${TARGET_BRANCH}"; then
-            echo "Merge successful"
+          UPDATED=""        # ramas pusheadas con éxito
+          PRS=""            # "rama:url" de PRs creados para resolución manual
+          ANY_PR=false
+          ANY_FAIL=false
 
-            # Validar sintaxis si está habilitado
-            if [ "$VALIDATE_SYNTAX" = "true" ]; then
-              echo "Validating syntax..."
-              SYNTAX_ERROR=false
-              SYNTAX_FILES=""
-
-              for file in $(find ${SRC_PATH} -name "${SYNTAX_PATTERN}" -type f 2>/dev/null); do
-                if ! node --check "$file" 2>/dev/null; then
-                  echo "Syntax error in: $file"
-                  node --check "$file" 2>&1 || true
-                  SYNTAX_ERROR=true
-                  SYNTAX_FILES="${SYNTAX_FILES}${file}\n"
-                fi
-              done
-
-              if [ "$SYNTAX_ERROR" = true ]; then
-                echo "Syntax errors detected. Creating PR for manual resolution."
-                echo "result=syntax_error" >> $GITHUB_OUTPUT
-                echo "syntax_files=${SYNTAX_FILES}" >> $GITHUB_OUTPUT
-
-                TEMP_BRANCH="backmerge/${PR_BRANCH}-syntax-fix"
-                git checkout -b $TEMP_BRANCH
-                git push -u origin $TEMP_BRANCH
-
-                PR_URL=$(gh pr create --base ${TARGET_BRANCH} --head $TEMP_BRANCH \
-                  --title "Back-merge: ${PR_BRANCH} (syntax errors)" \
-                  --body "## Syntax Errors Detected\n\nThis PR was automatically created because syntax errors were found after merging.\n\n**Manual intervention required** - please fix the syntax errors before merging.\n\n### Details\n- Original PR: #${PR_NUMBER}\n- Branch: ${PR_BRANCH}\n- Source: master to ${TARGET_BRANCH}\n\n---\nAutomated back-merge via GitHub Actions")
-
-                echo "pr_url=${PR_URL}" >> $GITHUB_OUTPUT
-                echo "PR created for manual syntax fix"
-                exit 0
+          # ── Sintaxis sobre el árbol actual ───────────────────────────────
+          check_syntax() {
+            [ "$VALIDATE_SYNTAX" = "true" ] || return 0
+            local bad=false
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              if ! node --check "$f" 2>/dev/null; then
+                echo "Error de sintaxis en: $f"; node --check "$f" 2>&1 || true; bad=true
               fi
+            done < <(find "$SRC_PATH" -name "$SYNTAX_PATTERN" -type f 2>/dev/null)
+            [ "$bad" = false ]
+          }
+
+          # ── Back-merge de master a UNA rama ──────────────────────────────
+          backmerge_one() {
+            local TB="$1"
+
+            if ! git rev-parse --verify -q "origin/${TB}" >/dev/null; then
+              echo "ℹ️ rama '${TB}' no existe; se salta."
+              return 0
             fi
 
-            echo "Pushing to ${TARGET_BRANCH}"
-            # Push con reintento: si ${TARGET_BRANCH} avanzó entre el merge y el push
-            # (otro back-merge o un push concurrente), re-incorporamos esos commits y
-            # reintentamos en vez de fallar y dejar develop atrás.
-            MAX_RETRIES=5
-            attempt=0
-            PUSHED=false
-            until [ "$attempt" -ge "$MAX_RETRIES" ]; do
-              if git push origin ${TARGET_BRANCH}; then
-                PUSHED=true
-                break
+            git checkout -B "$TB" "origin/${TB}"
+            git pull origin "$TB" --no-edit || true
+
+            # Idempotente: si ${TB} ya contiene master, nada que bajar.
+            if git merge-base --is-ancestor "origin/master" "HEAD"; then
+              echo "✅ ${TB} ya contiene master; sin cambios."
+              return 0
+            fi
+
+            echo "🔀 Back-merge master → ${TB}"
+            if ! git merge origin/master --no-ff -m "chore: auto back-merge ${PR_BRANCH} from master to ${TB}"; then
+              echo "::warning::Conflictos en ${TB}; creando PR para resolución manual."
+              git merge --abort
+              local TMP="backmerge/${PR_BRANCH}-to-${TB}"
+              git checkout -B "$TMP"
+              git merge origin/master --no-ff --no-commit || true
+              git add -A
+              git commit -m "chore: back-merge ${PR_BRANCH} from master to ${TB} (con conflictos)"
+              git push -u origin "$TMP" --force-with-lease
+              local URL
+              URL=$(gh pr create --base "$TB" --head "$TMP" \
+                --title "Back-merge: ${PR_BRANCH} → ${TB} (conflictos)" \
+                --body "Back-merge automático master→${TB} con conflictos. Resolver manualmente. PR origen #${PR_NUMBER} (${PR_BRANCH})." 2>/dev/null)
+              PRS="${PRS}${TB}: ${URL}\n"; ANY_PR=true
+              return 0
+            fi
+
+            if ! check_syntax; then
+              echo "::warning::Errores de sintaxis en ${TB}; creando PR."
+              local TMP="backmerge/${PR_BRANCH}-to-${TB}-syntax"
+              git checkout -B "$TMP"
+              git push -u origin "$TMP" --force-with-lease
+              local URL
+              URL=$(gh pr create --base "$TB" --head "$TMP" \
+                --title "Back-merge: ${PR_BRANCH} → ${TB} (sintaxis)" \
+                --body "Back-merge automático master→${TB} mergeó limpio pero node --check falló. Revisar. PR origen #${PR_NUMBER}." 2>/dev/null)
+              PRS="${PRS}${TB}: ${URL}\n"; ANY_PR=true
+              return 0
+            fi
+
+            # Push con reintento ante non-fast-forward.
+            local MAX=5 attempt=0
+            until [ "$attempt" -ge "$MAX" ]; do
+              if git push origin "$TB"; then
+                echo "✅ ${TB} actualizada."; UPDATED="${UPDATED}${TB} "; return 0
               fi
               attempt=$((attempt + 1))
-              echo "Push rechazado (intento ${attempt}/${MAX_RETRIES}); re-incorporando ${TARGET_BRANCH} remoto..."
-              git fetch origin ${TARGET_BRANCH}
-              if ! git merge origin/${TARGET_BRANCH} --no-edit; then
-                echo "::error::Conflicto al re-incorporar ${TARGET_BRANCH} durante el reintento de push."
-                git merge --abort || true
-                echo "result=push_conflict" >> $GITHUB_OUTPUT
-                exit 1
+              echo "push a ${TB} rechazado (intento ${attempt}/${MAX}); re-incorporando remoto..."
+              git fetch origin "$TB"
+              if ! git merge "origin/${TB}" --no-edit; then
+                echo "::error::Conflicto al re-incorporar ${TB} en el reintento."
+                git merge --abort || true; ANY_FAIL=true; return 1
               fi
             done
+            echo "::error::No se pudo pushear a ${TB} tras ${MAX} intentos."; ANY_FAIL=true; return 1
+          }
 
-            if [ "$PUSHED" != true ]; then
-              echo "::error::No se pudo pushear a ${TARGET_BRANCH} tras ${MAX_RETRIES} intentos."
-              echo "result=push_failed" >> $GITHUB_OUTPUT
-              exit 1
-            fi
+          # ── Lista de destinos: principal + extras, deduplicada ───────────
+          for TB in $TARGET_BRANCH $EXTRA_BRANCHES; do
+            case " $SEEN " in *" $TB "*) continue;; esac
+            SEEN="${SEEN:-} $TB"
+            backmerge_one "$TB" || true
+          done
 
-            echo "result=success" >> $GITHUB_OUTPUT
+          # ── Resultado agregado ───────────────────────────────────────────
+          {
+            echo "updated=${UPDATED}"
+            echo "prs<<EOF"; printf '%b' "$PRS"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$ANY_FAIL" = true ]; then
+            echo "result=failed" >> "$GITHUB_OUTPUT"; exit 1
+          elif [ "$ANY_PR" = true ]; then
+            echo "result=needs_review" >> "$GITHUB_OUTPUT"
           else
-            echo "Merge conflicts detected. Creating PR for manual resolution."
-            echo "result=conflict" >> $GITHUB_OUTPUT
-            git merge --abort
-
-            TEMP_BRANCH="backmerge/${PR_BRANCH}-to-${TARGET_BRANCH}"
-            git checkout -b $TEMP_BRANCH
-            git merge origin/master --no-ff --no-commit || true
-
-            if git diff --name-only --diff-filter=U | grep -q .; then
-              echo "Conflicts found in:"
-              CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
-              echo "$CONFLICT_FILES"
-              echo "conflict_files=${CONFLICT_FILES}" >> $GITHUB_OUTPUT
-
-              git add -A
-              git commit -m "chore: back-merge ${PR_BRANCH} from master to ${TARGET_BRANCH} (with conflicts)"
-              git push -u origin $TEMP_BRANCH
-
-              PR_URL=$(gh pr create --base ${TARGET_BRANCH} --head $TEMP_BRANCH \
-                --title "Back-merge: ${PR_BRANCH}" \
-                --body "## Merge Conflicts Detected\n\nThis PR was automatically created to back-merge changes from master to ${TARGET_BRANCH}.\n\n**Manual intervention required** - there are merge conflicts that need to be resolved.\n\n### Details\n- Original PR: #${PR_NUMBER}\n- Branch: ${PR_BRANCH}\n- Source: master to ${TARGET_BRANCH}\n\n### Next Steps\n1. Review the conflicts in this PR\n2. Resolve conflicts manually\n3. Merge this PR to ${TARGET_BRANCH}\n\n---\nAutomated back-merge via GitHub Actions")
-
-              echo "pr_url=${PR_URL}" >> $GITHUB_OUTPUT
-              echo "PR created for manual conflict resolution"
-            fi
+            echo "result=success" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Notify Slack on Success
@@ -182,102 +207,40 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
           PR_TITLE: ${{ inputs.pr_title }}
-          PR_BRANCH: ${{ inputs.pr_branch }}
           PR_URL: ${{ inputs.pr_url }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          TARGET_BRANCH: ${{ inputs.target_branch }}
+          UPDATED: ${{ steps.backmerge.outputs.updated }}
         run: |
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            curl -X POST "$SLACK_WEBHOOK_URL" \
-              -H 'Content-type: application/json' \
-              -d "{
-                \"blocks\": [
-                  {
-                    \"type\": \"section\",
-                    \"text\": {
-                      \"type\": \"mrkdwn\",
-                      \"text\": \"✅ *Back-merge Completado*\n\n*Repositorio:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Branch:* ${PR_BRANCH}\n*Destino:* ${TARGET_BRANCH}\n*Acción:* Los cambios de master fueron sincronizados a ${TARGET_BRANCH} automáticamente\n*Actor:* ${{ github.actor }}\"
-                    }
-                  }
-                ]
-              }"
+            BR="${UPDATED:-ninguna (ya estaban al día)}"
+            curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
+              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"✅ *Back-merge completado*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Ramas sincronizadas con master:* ${BR}\n*Actor:* ${{ github.actor }}\"}}]}"
           fi
 
-      - name: Notify Slack on Syntax Error
-        if: steps.backmerge.outputs.result == 'syntax_error'
+      - name: Notify Slack on Needs Review
+        if: steps.backmerge.outputs.result == 'needs_review'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
           PR_TITLE: ${{ inputs.pr_title }}
           PR_URL: ${{ inputs.pr_url }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          CREATED_PR_URL: ${{ steps.backmerge.outputs.pr_url }}
+          UPDATED: ${{ steps.backmerge.outputs.updated }}
+          PRS: ${{ steps.backmerge.outputs.prs }}
         run: |
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            curl -X POST "$SLACK_WEBHOOK_URL" \
-              -H 'Content-type: application/json' \
-              -d "{
-                \"blocks\": [
-                  {
-                    \"type\": \"section\",
-                    \"text\": {
-                      \"type\": \"mrkdwn\",
-                      \"text\": \"⚠️ *Back-merge Requiere Revisión Manual*\n\n*Repositorio:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Problema:* Se detectaron errores de sintaxis en el código después del merge\n*PR creado para resolver:* ${CREATED_PR_URL}\n*Acción requerida:* Revisar y corregir los errores de sintaxis antes de hacer merge del PR\n*Actor:* ${{ github.actor }}\"
-                    }
-                  }
-                ]
-              }"
-          fi
-
-      - name: Notify Slack on Conflict
-        if: steps.backmerge.outputs.result == 'conflict'
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
-          PR_TITLE: ${{ inputs.pr_title }}
-          PR_URL: ${{ inputs.pr_url }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          CREATED_PR_URL: ${{ steps.backmerge.outputs.pr_url }}
-        run: |
-          if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            curl -X POST "$SLACK_WEBHOOK_URL" \
-              -H 'Content-type: application/json' \
-              -d "{
-                \"blocks\": [
-                  {
-                    \"type\": \"section\",
-                    \"text\": {
-                      \"type\": \"mrkdwn\",
-                      \"text\": \"⚠️ *Back-merge Con Conflictos*\n\n*Repositorio:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Problema:* Hay conflictos de merge entre master y ${{ inputs.target_branch }}\n*PR creado para resolver:* ${CREATED_PR_URL}\n*Acción requerida:* Resolver los conflictos manualmente y hacer merge del PR\n*Actor:* ${{ github.actor }}\"
-                    }
-                  }
-                ]
-              }"
+            curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
+              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"⚠️ *Back-merge requiere revisión manual*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Sincronizadas OK:* ${UPDATED:-ninguna}\n*PRs a resolver:*\n${PRS}\n*Actor:* ${{ github.actor }}\"}}]}"
           fi
 
       - name: Notify Slack on Failure
-        if: failure()
+        if: failure() || steps.backmerge.outputs.result == 'failed'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
           PR_TITLE: ${{ inputs.pr_title }}
-          PR_BRANCH: ${{ inputs.pr_branch }}
           PR_URL: ${{ inputs.pr_url }}
           PR_NUMBER: ${{ inputs.pr_number }}
-          TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            curl -X POST "$SLACK_WEBHOOK_URL" \
-              -H 'Content-type: application/json' \
-              -d "{
-                \"blocks\": [
-                  {
-                    \"type\": \"section\",
-                    \"text\": {
-                      \"type\": \"mrkdwn\",
-                      \"text\": \"❌ *Back-merge Falló*\n\n*Repositorio:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Branch:* ${PR_BRANCH}\n*Error:* El workflow de back-merge falló inesperadamente\n*Acción requerida:* Revisar los logs y hacer el merge manual de master a ${TARGET_BRANCH}\n*Logs:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver detalles>\n*Actor:* ${{ github.actor }}\"
-                    }
-                  }
-                ]
-              }"
+            curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
+              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"❌ *Back-merge falló — merge manual requerido*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Logs:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|ver detalles>\n*Actor:* ${{ github.actor }}\"}}]}"
           fi
-          echo "Back-merge failed! Manual intervention required."
-          echo "Branch: ${PR_BRANCH}"
-          echo "Please manually merge master into ${TARGET_BRANCH}."
