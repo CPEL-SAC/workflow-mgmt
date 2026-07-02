@@ -49,8 +49,13 @@ on:
         description: 'Nombre del secret en central-secrets para test'
         required: true
         type: string
-      hosting_target:
-        description: 'Target de hosting en firebase.json/.firebaserc'
+      hosting_target_test:
+        description: 'Target de hosting para test (firebase.json/.firebaserc)'
+        required: false
+        type: string
+        default: 'app'
+      hosting_target_prod:
+        description: 'Target de hosting para prod'
         required: false
         type: string
         default: 'app'
@@ -111,7 +116,7 @@ jobs:
       - name: Build (test)
         run: npx env-cmd -f ${{ inputs.env_file_test }} npm run build
       - name: Deploy to Firebase Hosting (test)
-        run: npx firebase-tools deploy --only hosting:${{ inputs.hosting_target }} --project ${{ inputs.project_test }} --non-interactive
+        run: npx firebase-tools deploy --only hosting:${{ inputs.hosting_target_test }} --project ${{ inputs.project_test }} --non-interactive
       - name: Notify Slack on Failure
         if: failure()
         env:
@@ -156,7 +161,7 @@ jobs:
       - name: Build (prod)
         run: npx env-cmd -f ${{ inputs.env_file_prod }} npm run build
       - name: Deploy to Firebase Hosting (prod)
-        run: npx firebase-tools deploy --only hosting:${{ inputs.hosting_target }} --project ${{ inputs.project_prod }} --non-interactive
+        run: npx firebase-tools deploy --only hosting:${{ inputs.hosting_target_prod }} --project ${{ inputs.project_prod }} --non-interactive
       - name: Notify Slack on Failure
         if: failure()
         env:
