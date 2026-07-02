@@ -1,0 +1,168 @@
+name: Firebase Deploy (Reusable)
+
+# Deploy reusable para frontends Vite/React a Firebase Hosting.
+# Un caller de ~12 líneas por repo (ver ejemplo abajo). Hosting clásico/estático:
+# la config VITE_* se hornea en el build desde central-secrets (no hay env server-side).
+#
+# Modelo de ramas:
+#   push a `test`   -> deploy al site de test  (project_test)
+#   push a `master` -> deploy al site de prod  (project_prod)
+#
+# Config de entorno: en el repo de secretos -> central-secrets/<secret_test|secret_prod>.
+# El deploy la jala y la mergea al env file antes del build (env-cmd la hornea).
+# Los .env committeados son solo placeholders.
+#
+# Ejemplo de caller:
+#   name: Deploy cliente-ganaya
+#   on: { push: { branches: [master, test] }, workflow_dispatch: {} }
+#   jobs:
+#     deploy:
+#       uses: CPEL-SAC/workflow-mgmt/.github/workflows/firebase-deploy.yml@main
+#       with:
+#         project_prod: ganaya-bet
+#         project_test: ganaya-test
+#         secret_prod: cliente-ganaya-prod
+#         secret_test: cliente-ganaya-dev
+#         env_file_prod: .env.production
+#         env_file_test: .env.development
+#       secrets:
+#         sa_prod: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROD }}
+#         sa_test: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_TEST }}
+#         slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+on:
+  workflow_call:
+    inputs:
+      project_prod:
+        description: 'Proyecto GCP/Firebase de prod'
+        required: true
+        type: string
+      project_test:
+        description: 'Proyecto GCP/Firebase de test'
+        required: true
+        type: string
+      secret_prod:
+        description: 'Nombre del secret en central-secrets para prod'
+        required: true
+        type: string
+      secret_test:
+        description: 'Nombre del secret en central-secrets para test'
+        required: true
+        type: string
+      hosting_target:
+        description: 'Target de hosting en firebase.json/.firebaserc'
+        required: false
+        type: string
+        default: 'app'
+      env_file_prod:
+        description: 'Archivo .env a usar/mergear en prod'
+        required: false
+        type: string
+        default: '.env.prod'
+      env_file_test:
+        description: 'Archivo .env a usar/mergear en test'
+        required: false
+        type: string
+        default: '.env.test'
+      node_version:
+        required: false
+        type: string
+        default: '20'
+    secrets:
+      sa_prod:
+        required: true
+      sa_test:
+        required: true
+      slack_webhook_url:
+        required: false
+
+jobs:
+  deploy-test:
+    name: Deploy → ${{ inputs.project_test }} (test)
+    if: github.ref == 'refs/heads/test'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Authenticate with GCP (test)
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.sa_test }}
+      - name: Pull secrets from GCP Secret Manager
+        id: secrets
+        uses: google-github-actions/get-secretmanager-secrets@v2
+        with:
+          secrets: |
+            env_json:central-secrets/${{ inputs.secret_test }}
+      - name: Merge secrets into ${{ inputs.env_file_test }}
+        run: |
+          echo '${{ steps.secrets.outputs.env_json }}' | \
+          python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          for k, v in d.items():
+              print(f'{k}={v}')
+          " >> ${{ inputs.env_file_test }}
+      - name: Build (test)
+        run: npx env-cmd -f ${{ inputs.env_file_test }} npm run build
+      - name: Deploy to Firebase Hosting (test)
+        run: npx firebase-tools deploy --only hosting:${{ inputs.hosting_target }} --project ${{ inputs.project_test }} --non-interactive
+      - name: Notify Slack on Failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
+              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"❌ *Firebase deploy TEST falló* — ${{ github.repository }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>\"}}]}"
+          fi
+
+  deploy-prod:
+    name: Deploy → ${{ inputs.project_prod }} (prod)
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Authenticate with GCP (prod)
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.sa_prod }}
+      - name: Pull secrets from GCP Secret Manager
+        id: secrets
+        uses: google-github-actions/get-secretmanager-secrets@v2
+        with:
+          secrets: |
+            env_json:central-secrets/${{ inputs.secret_prod }}
+      - name: Merge secrets into ${{ inputs.env_file_prod }}
+        run: |
+          echo '${{ steps.secrets.outputs.env_json }}' | \
+          python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          for k, v in d.items():
+              print(f'{k}={v}')
+          " >> ${{ inputs.env_file_prod }}
+      - name: Build (prod)
+        run: npx env-cmd -f ${{ inputs.env_file_prod }} npm run build
+      - name: Deploy to Firebase Hosting (prod)
+        run: npx firebase-tools deploy --only hosting:${{ inputs.hosting_target }} --project ${{ inputs.project_prod }} --non-interactive
+      - name: Notify Slack on Failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
+              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"❌ *Firebase deploy PROD falló* — ${{ github.repository }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>\"}}]}"
+          fi
