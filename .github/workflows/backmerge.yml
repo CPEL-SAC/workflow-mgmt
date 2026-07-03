@@ -35,21 +35,25 @@ on:
         type: string
         default: 'src'
       pr_number:
-        description: 'Número del PR que disparó el backmerge'
+        description: 'Número del PR (opcional; vacío en push directo)'
         type: string
-        required: true
+        required: false
+        default: ''
       pr_title:
-        description: 'Título del PR'
+        description: 'Título del PR (opcional)'
         type: string
-        required: true
+        required: false
+        default: ''
       pr_branch:
-        description: 'Branch del PR'
+        description: 'Branch del PR (opcional; vacío en push directo → usa el commit sha)'
         type: string
-        required: true
+        required: false
+        default: ''
       pr_url:
-        description: 'URL del PR'
+        description: 'URL del PR (opcional)'
         type: string
-        required: true
+        required: false
+        default: ''
     secrets:
       repo_token:
         required: true
@@ -88,6 +92,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.repo_token }}
           PR_BRANCH: ${{ inputs.pr_branch }}
           PR_NUMBER: ${{ inputs.pr_number }}
+          COMMIT_SHA: ${{ github.sha }}
           TARGET_BRANCH: ${{ inputs.target_branch }}
           EXTRA_BRANCHES: ${{ inputs.extra_branches }}
           VALIDATE_SYNTAX: ${{ inputs.validate_syntax }}
@@ -96,6 +101,11 @@ jobs:
         run: |
           set -uo pipefail
           git fetch origin --prune
+
+          # Ref para nombres/mensajes: el branch del PR si vino de un PR, o el commit
+          # sha si fue push directo a master (así funciona en ambos casos).
+          REF="${PR_BRANCH:-push-${COMMIT_SHA:0:7}}"
+          PR_REF="${PR_NUMBER:-${COMMIT_SHA:0:7}}"
 
           UPDATED=""        # ramas pusheadas con éxito
           PRS=""            # "rama:url" de PRs creados para resolución manual
@@ -134,32 +144,32 @@ jobs:
             fi
 
             echo "🔀 Back-merge master → ${TB}"
-            if ! git merge origin/master --no-ff -m "chore: auto back-merge ${PR_BRANCH} from master to ${TB}"; then
+            if ! git merge origin/master --no-ff -m "chore: auto back-merge ${REF} from master to ${TB}"; then
               echo "::warning::Conflictos en ${TB}; creando PR para resolución manual."
               git merge --abort
-              local TMP="backmerge/${PR_BRANCH}-to-${TB}"
+              local TMP="backmerge/${REF}-to-${TB}"
               git checkout -B "$TMP"
               git merge origin/master --no-ff --no-commit || true
               git add -A
-              git commit -m "chore: back-merge ${PR_BRANCH} from master to ${TB} (con conflictos)"
+              git commit -m "chore: back-merge ${REF} from master to ${TB} (con conflictos)"
               git push -u origin "$TMP" --force-with-lease
               local URL
               URL=$(gh pr create --base "$TB" --head "$TMP" \
-                --title "Back-merge: ${PR_BRANCH} → ${TB} (conflictos)" \
-                --body "Back-merge automático master→${TB} con conflictos. Resolver manualmente. PR origen #${PR_NUMBER} (${PR_BRANCH})." 2>/dev/null)
+                --title "Back-merge: ${REF} → ${TB} (conflictos)" \
+                --body "Back-merge automático master→${TB} con conflictos. Resolver manualmente. PR origen #${PR_REF} (${REF})." 2>/dev/null)
               PRS="${PRS}${TB}: ${URL}\n"; ANY_PR=true
               return 0
             fi
 
             if ! check_syntax; then
               echo "::warning::Errores de sintaxis en ${TB}; creando PR."
-              local TMP="backmerge/${PR_BRANCH}-to-${TB}-syntax"
+              local TMP="backmerge/${REF}-to-${TB}-syntax"
               git checkout -B "$TMP"
               git push -u origin "$TMP" --force-with-lease
               local URL
               URL=$(gh pr create --base "$TB" --head "$TMP" \
-                --title "Back-merge: ${PR_BRANCH} → ${TB} (sintaxis)" \
-                --body "Back-merge automático master→${TB} mergeó limpio pero node --check falló. Revisar. PR origen #${PR_NUMBER}." 2>/dev/null)
+                --title "Back-merge: ${REF} → ${TB} (sintaxis)" \
+                --body "Back-merge automático master→${TB} mergeó limpio pero node --check falló. Revisar. PR origen #${PR_REF}." 2>/dev/null)
               PRS="${PRS}${TB}: ${URL}\n"; ANY_PR=true
               return 0
             fi
@@ -215,7 +225,7 @@ jobs:
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
             BR="${UPDATED:-ninguna (ya estaban al día)}"
             curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
-              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"✅ *Back-merge completado*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Ramas sincronizadas con master:* ${BR}\n*Actor:* ${{ github.actor }}\"}}]}"
+              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"✅ *Back-merge completado*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_REF} - ${PR_TITLE}>\n*Ramas sincronizadas con master:* ${BR}\n*Actor:* ${{ github.actor }}\"}}]}"
           fi
 
       - name: Notify Slack on Needs Review
@@ -230,7 +240,7 @@ jobs:
         run: |
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
             curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
-              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"⚠️ *Back-merge requiere revisión manual*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Sincronizadas OK:* ${UPDATED:-ninguna}\n*PRs a resolver:*\n${PRS}\n*Actor:* ${{ github.actor }}\"}}]}"
+              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"⚠️ *Back-merge requiere revisión manual*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_REF} - ${PR_TITLE}>\n*Sincronizadas OK:* ${UPDATED:-ninguna}\n*PRs a resolver:*\n${PRS}\n*Actor:* ${{ github.actor }}\"}}]}"
           fi
 
       - name: Notify Slack on Failure
@@ -243,5 +253,5 @@ jobs:
         run: |
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
             curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
-              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"❌ *Back-merge falló — merge manual requerido*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_NUMBER} - ${PR_TITLE}>\n*Logs:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|ver detalles>\n*Actor:* ${{ github.actor }}\"}}]}"
+              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"❌ *Back-merge falló — merge manual requerido*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_REF} - ${PR_TITLE}>\n*Logs:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|ver detalles>\n*Actor:* ${{ github.actor }}\"}}]}"
           fi
