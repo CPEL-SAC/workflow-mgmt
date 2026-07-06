@@ -1,0 +1,108 @@
+name: Heroku Deploy (Reusable)
+
+# Deploy reusable para backends Node.js a Heroku (git push vía HEROKU_API_KEY).
+# Un caller de ~15 líneas por repo (ver ejemplo abajo). La lógica vive una sola vez.
+#
+# Modelo de ramas (igual que firebase-deploy.yml):
+#   push a `test`   -> deploy a la app de test  (app_test)
+#   push a `master` -> deploy a la app de prod  (app_prod)
+#
+# La config/secrets del runtime NO va acá: vive en las *config vars* de la app Heroku
+# (se setean con `heroku config:set` o desde el dashboard). Este workflow solo publica el código.
+#
+# Ejemplo de caller (.github/workflows/deploy.yml):
+#   name: Deploy ganaya-backend
+#   on: { push: { branches: [master, test] }, workflow_dispatch: {} }
+#   jobs:
+#     deploy:
+#       uses: CPEL-SAC/workflow-mgmt/.github/workflows/heroku-deploy.yml@main
+#       with:
+#         app_prod: ganaya
+#         app_test: ganaya-test
+#         health_path: /api/v1        # opcional
+#       secrets:
+#         heroku_api_key: ${{ secrets.HEROKU_API_KEY }}
+#         heroku_email: ${{ secrets.HEROKU_EMAIL }}
+#         slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+on:
+  workflow_call:
+    inputs:
+      app_prod:
+        description: 'Nombre de la app Heroku de prod'
+        required: true
+        type: string
+      app_test:
+        description: 'Nombre de la app Heroku de test'
+        required: true
+        type: string
+      health_path:
+        description: 'Ruta de healthcheck tras el deploy (opcional, ej. /health). Vacío = sin check.'
+        required: false
+        type: string
+        default: ''
+      procfile:
+        description: 'Procfile inline (opcional; si el repo no tiene Procfile, ej. "web: node index.js")'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      heroku_api_key:
+        required: true
+      heroku_email:
+        required: true
+      slack_webhook_url:
+        required: false
+
+jobs:
+  deploy-test:
+    name: Deploy → ${{ inputs.app_test }} (test)
+    if: github.ref == 'refs/heads/test'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Deploy to Heroku (test)
+        uses: akhileshns/heroku-deploy@v3.13.15
+        with:
+          heroku_api_key: ${{ secrets.heroku_api_key }}
+          heroku_app_name: ${{ inputs.app_test }}
+          heroku_email: ${{ secrets.heroku_email }}
+          procfile: ${{ inputs.procfile }}
+          healthcheck: ${{ inputs.health_path != '' && format('https://{0}.herokuapp.com{1}', inputs.app_test, inputs.health_path) || '' }}
+      - name: Notify Slack on Failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
+              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"❌ *Heroku deploy TEST falló* — ${{ github.repository }} → ${{ inputs.app_test }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>\"}}]}"
+          fi
+
+  deploy-prod:
+    name: Deploy → ${{ inputs.app_prod }} (prod)
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Deploy to Heroku (prod)
+        uses: akhileshns/heroku-deploy@v3.13.15
+        with:
+          heroku_api_key: ${{ secrets.heroku_api_key }}
+          heroku_app_name: ${{ inputs.app_prod }}
+          heroku_email: ${{ secrets.heroku_email }}
+          procfile: ${{ inputs.procfile }}
+          healthcheck: ${{ inputs.health_path != '' && format('https://{0}.herokuapp.com{1}', inputs.app_prod, inputs.health_path) || '' }}
+      - name: Notify Slack on Failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
+              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"❌ *Heroku deploy PROD falló* — ${{ github.repository }} → ${{ inputs.app_prod }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>\"}}]}"
+          fi
