@@ -1,14 +1,17 @@
 name: Heroku Deploy (Reusable)
 
 # Deploy reusable para backends Node.js a Heroku (git push vía HEROKU_API_KEY).
-# Un caller de ~15 líneas por repo (ver ejemplo abajo). La lógica vive una sola vez.
+# Un caller de ~18 líneas por repo (ver ejemplo abajo). La lógica vive una sola vez.
 #
 # Modelo de ramas (igual que firebase-deploy.yml):
 #   push a `test`   -> deploy a la app de test  (app_test)
 #   push a `master` -> deploy a la app de prod  (app_prod)
 #
-# La config/secrets del runtime NO va acá: vive en las *config vars* de la app Heroku
-# (se setean con `heroku config:set` o desde el dashboard). Este workflow solo publica el código.
+# Config/secrets del runtime (ESTÁNDAR, opcional): si se pasa `secret_test`/`secret_prod`,
+# el workflow lee `central-secrets/<secret>` (fuente de verdad = repo de secretos) y aplica
+# los valores como *config vars* de la app Heroku antes del deploy. Solo setea valores NO
+# vacíos (los placeholders no pisan config existente). Requiere `gcp_sa_test`/`gcp_sa_prod`
+# (key de una SA con secretAccessor sobre ese secreto).
 #
 # Ejemplo de caller (.github/workflows/deploy.yml):
 #   name: Deploy ganaya-backend
@@ -19,10 +22,13 @@ name: Heroku Deploy (Reusable)
 #       with:
 #         app_prod: ganaya
 #         app_test: ganaya-test
-#         health_path: /api/v1        # opcional
+#         secret_prod: ganaya-backend-prod   # central-secrets/<...>
+#         secret_test: ganaya-backend-dev
 #       secrets:
 #         heroku_api_key: ${{ secrets.HEROKU_API_KEY }}
 #         heroku_email: ${{ secrets.HEROKU_EMAIL }}
+#         gcp_sa_prod: ${{ secrets.GCP_SA_PROD }}
+#         gcp_sa_test: ${{ secrets.GCP_SA_TEST }}
 #         slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
 
 on:
@@ -36,13 +42,13 @@ on:
         description: 'Nombre de la app Heroku de test'
         required: true
         type: string
-      health_path:
-        description: 'Ruta de healthcheck tras el deploy (opcional, ej. /health). Vacío = sin check.'
+      secret_prod:
+        description: 'central-secrets/<secret> con las config vars de prod (opcional). Vacío = no sincronizar config.'
         required: false
         type: string
         default: ''
-      procfile:
-        description: 'Procfile inline (opcional; si el repo no tiene Procfile, ej. "web: node index.js")'
+      secret_test:
+        description: 'central-secrets/<secret> con las config vars de test (opcional).'
         required: false
         type: string
         default: ''
@@ -51,6 +57,10 @@ on:
         required: true
       heroku_email:
         required: true
+      gcp_sa_prod:
+        required: false
+      gcp_sa_test:
+        required: false
       slack_webhook_url:
         required: false
 
@@ -63,13 +73,52 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ── Config vars desde central-secrets (opcional) ──
+      - name: Authenticate with GCP (test)
+        if: inputs.secret_test != ''
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.gcp_sa_test }}
+      - name: Pull config from Secret Manager (test)
+        id: sec
+        if: inputs.secret_test != ''
+        uses: google-github-actions/get-secretmanager-secrets@v2
+        with:
+          secrets: |
+            env_json:central-secrets/${{ inputs.secret_test }}
+      - name: Sync Heroku config vars (test)
+        if: inputs.secret_test != ''
+        env:
+          HEROKU_API_KEY: ${{ secrets.heroku_api_key }}
+          APP: ${{ inputs.app_test }}
+          ENV_JSON: ${{ steps.sec.outputs.env_json }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request
+          d = json.loads(os.environ["ENV_JSON"])
+          payload = {k: v for k, v in d.items() if v not in ("", None)}
+          if not payload:
+              print("Sin valores (placeholders vacíos); no se tocan las config vars.")
+              raise SystemExit(0)
+          req = urllib.request.Request(
+              f"https://api.heroku.com/apps/{os.environ['APP']}/config-vars",
+              data=json.dumps(payload).encode(), method="PATCH",
+              headers={"Authorization": f"Bearer {os.environ['HEROKU_API_KEY']}",
+                       "Accept": "application/vnd.heroku+json; version=3",
+                       "Content-Type": "application/json"})
+          urllib.request.urlopen(req)
+          print(f"Config vars aplicadas a {os.environ['APP']}: {len(payload)}")
+          PY
+
+      # ── Deploy (git push a Heroku, sin CLI) ──
       - name: Deploy to Heroku (test)
         env:
           HEROKU_API_KEY: ${{ secrets.heroku_api_key }}
           APP: ${{ inputs.app_test }}
         run: |
-          # Deploy vía git push a Heroku (sin CLI: el runner ya no lo trae).
           git push -f "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${APP}.git" HEAD:refs/heads/main
+
       - name: Notify Slack on Failure
         if: failure()
         env:
@@ -88,13 +137,52 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ── Config vars desde central-secrets (opcional) ──
+      - name: Authenticate with GCP (prod)
+        if: inputs.secret_prod != ''
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.gcp_sa_prod }}
+      - name: Pull config from Secret Manager (prod)
+        id: sec
+        if: inputs.secret_prod != ''
+        uses: google-github-actions/get-secretmanager-secrets@v2
+        with:
+          secrets: |
+            env_json:central-secrets/${{ inputs.secret_prod }}
+      - name: Sync Heroku config vars (prod)
+        if: inputs.secret_prod != ''
+        env:
+          HEROKU_API_KEY: ${{ secrets.heroku_api_key }}
+          APP: ${{ inputs.app_prod }}
+          ENV_JSON: ${{ steps.sec.outputs.env_json }}
+        run: |
+          python3 - <<'PY'
+          import os, json, urllib.request
+          d = json.loads(os.environ["ENV_JSON"])
+          payload = {k: v for k, v in d.items() if v not in ("", None)}
+          if not payload:
+              print("Sin valores (placeholders vacíos); no se tocan las config vars.")
+              raise SystemExit(0)
+          req = urllib.request.Request(
+              f"https://api.heroku.com/apps/{os.environ['APP']}/config-vars",
+              data=json.dumps(payload).encode(), method="PATCH",
+              headers={"Authorization": f"Bearer {os.environ['HEROKU_API_KEY']}",
+                       "Accept": "application/vnd.heroku+json; version=3",
+                       "Content-Type": "application/json"})
+          urllib.request.urlopen(req)
+          print(f"Config vars aplicadas a {os.environ['APP']}: {len(payload)}")
+          PY
+
+      # ── Deploy (git push a Heroku, sin CLI) ──
       - name: Deploy to Heroku (prod)
         env:
           HEROKU_API_KEY: ${{ secrets.heroku_api_key }}
           APP: ${{ inputs.app_prod }}
         run: |
-          # Deploy vía git push a Heroku (sin CLI: el runner ya no lo trae).
           git push -f "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${APP}.git" HEAD:refs/heads/main
+
       - name: Notify Slack on Failure
         if: failure()
         env:
