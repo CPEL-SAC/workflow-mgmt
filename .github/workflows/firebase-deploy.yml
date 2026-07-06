@@ -106,6 +106,10 @@ jobs:
             env_json:central-secrets/${{ inputs.secret_test }}
       - name: Merge secrets into ${{ inputs.env_file_test }}
         run: |
+          # Garantiza salto de línea antes de appendear: si el .env committeado
+          # no termina en \n, el append pegaría la 1ª clave del secreto a la última
+          # línea (bug que dejó FIREBASE_CONFIG vacío → pantalla en blanco).
+          printf '\n' >> ${{ inputs.env_file_test }}
           echo '${{ steps.secrets.outputs.env_json }}' | \
           python3 -c "
           import sys, json
@@ -151,6 +155,10 @@ jobs:
             env_json:central-secrets/${{ inputs.secret_prod }}
       - name: Merge secrets into ${{ inputs.env_file_prod }}
         run: |
+          # Garantiza salto de línea antes de appendear: si el .env committeado
+          # no termina en \n, el append pegaría la 1ª clave del secreto a la última
+          # línea (bug que dejó FIREBASE_CONFIG vacío → pantalla en blanco).
+          printf '\n' >> ${{ inputs.env_file_prod }}
           echo '${{ steps.secrets.outputs.env_json }}' | \
           python3 -c "
           import sys, json
