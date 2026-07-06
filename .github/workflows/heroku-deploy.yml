@@ -64,13 +64,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Deploy to Heroku (test)
-        uses: akhileshns/heroku-deploy@v3.13.15
-        with:
-          heroku_api_key: ${{ secrets.heroku_api_key }}
-          heroku_app_name: ${{ inputs.app_test }}
-          heroku_email: ${{ secrets.heroku_email }}
-          procfile: ${{ inputs.procfile }}
-          healthcheck: ${{ inputs.health_path != '' && format('https://{0}.herokuapp.com{1}', inputs.app_test, inputs.health_path) || '' }}
+        env:
+          HEROKU_API_KEY: ${{ secrets.heroku_api_key }}
+          APP: ${{ inputs.app_test }}
+        run: |
+          # Deploy vía git push a Heroku (sin CLI: el runner ya no lo trae).
+          git push -f "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${APP}.git" HEAD:refs/heads/main
       - name: Notify Slack on Failure
         if: failure()
         env:
@@ -90,13 +89,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Deploy to Heroku (prod)
-        uses: akhileshns/heroku-deploy@v3.13.15
-        with:
-          heroku_api_key: ${{ secrets.heroku_api_key }}
-          heroku_app_name: ${{ inputs.app_prod }}
-          heroku_email: ${{ secrets.heroku_email }}
-          procfile: ${{ inputs.procfile }}
-          healthcheck: ${{ inputs.health_path != '' && format('https://{0}.herokuapp.com{1}', inputs.app_prod, inputs.health_path) || '' }}
+        env:
+          HEROKU_API_KEY: ${{ secrets.heroku_api_key }}
+          APP: ${{ inputs.app_prod }}
+        run: |
+          # Deploy vía git push a Heroku (sin CLI: el runner ya no lo trae).
+          git push -f "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${APP}.git" HEAD:refs/heads/main
       - name: Notify Slack on Failure
         if: failure()
         env:
