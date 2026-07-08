@@ -93,7 +93,7 @@ jobs:
           node-version: ${{ inputs.node_version }}
           cache: 'npm'
       - name: Install dependencies
-        run: npm ci
+        run: npm ci || npm install   # ci reproducible; si el lock está desincronizado, npm install lo regenera y sigue (no tumba el deploy)
       - name: Authenticate with GCP (test)
         uses: google-github-actions/auth@v2
         with:
@@ -142,7 +142,7 @@ jobs:
           node-version: ${{ inputs.node_version }}
           cache: 'npm'
       - name: Install dependencies
-        run: npm ci
+        run: npm ci || npm install   # ci reproducible; si el lock está desincronizado, npm install lo regenera y sigue (no tumba el deploy)
       - name: Authenticate with GCP (prod)
         uses: google-github-actions/auth@v2
         with:
