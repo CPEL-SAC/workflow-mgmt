@@ -213,6 +213,10 @@ jobs:
             echo "result=success" >> "$GITHUB_OUTPUT"
           fi
 
+      # Nota: el "origen" se calcula acá (no se puede reusar PR_REF del step anterior:
+      # es una var de shell local a ese step). Si vino de un PR se linkea el PR; si fue
+      # push directo a master, se linkea el commit. El payload se arma con python3 para
+      # escapar bien títulos con comillas.
       - name: Notify Slack on Success
         if: steps.backmerge.outputs.result == 'success'
         env:
@@ -221,12 +225,23 @@ jobs:
           PR_URL: ${{ inputs.pr_url }}
           PR_NUMBER: ${{ inputs.pr_number }}
           UPDATED: ${{ steps.backmerge.outputs.updated }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
         run: |
-          if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            BR="${UPDATED:-ninguna (ya estaban al día)}"
-            curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
-              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"✅ *Back-merge completado*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_REF} - ${PR_TITLE}>\n*Ramas sincronizadas con master:* ${BR}\n*Actor:* ${{ github.actor }}\"}}]}"
-          fi
+          [ -n "$SLACK_WEBHOOK_URL" ] || exit 0
+          python3 - <<'PY'
+          import os, json, urllib.request
+          n, u, t = os.environ.get("PR_NUMBER",""), os.environ.get("PR_URL",""), os.environ.get("PR_TITLE","")
+          origin = f"<{u}|#{n} - {t}>" if n else f"push directo <{os.environ['COMMIT_URL']}|`{os.environ['COMMIT_SHA'][:7]}`>"
+          br = (os.environ.get("UPDATED","").strip() or "ninguna (ya estaban al día)")
+          text = (f"✅ *Back-merge completado*\n*Repo:* {os.environ['REPO']}\n*Origen:* {origin}\n"
+                  f"*Ramas sincronizadas con master:* {br}\n*Actor:* {os.environ['ACTOR']}")
+          p = {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":text}}]}
+          urllib.request.urlopen(urllib.request.Request(os.environ["SLACK_WEBHOOK_URL"],
+            data=json.dumps(p).encode(), headers={"Content-type":"application/json"}))
+          PY
 
       - name: Notify Slack on Needs Review
         if: steps.backmerge.outputs.result == 'needs_review'
@@ -237,11 +252,23 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           UPDATED: ${{ steps.backmerge.outputs.updated }}
           PRS: ${{ steps.backmerge.outputs.prs }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
         run: |
-          if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
-              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"⚠️ *Back-merge requiere revisión manual*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_REF} - ${PR_TITLE}>\n*Sincronizadas OK:* ${UPDATED:-ninguna}\n*PRs a resolver:*\n${PRS}\n*Actor:* ${{ github.actor }}\"}}]}"
-          fi
+          [ -n "$SLACK_WEBHOOK_URL" ] || exit 0
+          python3 - <<'PY'
+          import os, json, urllib.request
+          n, u, t = os.environ.get("PR_NUMBER",""), os.environ.get("PR_URL",""), os.environ.get("PR_TITLE","")
+          origin = f"<{u}|#{n} - {t}>" if n else f"push directo <{os.environ['COMMIT_URL']}|`{os.environ['COMMIT_SHA'][:7]}`>"
+          text = (f"⚠️ *Back-merge requiere revisión manual*\n*Repo:* {os.environ['REPO']}\n*Origen:* {origin}\n"
+                  f"*Sincronizadas OK:* {os.environ.get('UPDATED','').strip() or 'ninguna'}\n"
+                  f"*PRs a resolver:*\n{os.environ.get('PRS','')}\n*Actor:* {os.environ['ACTOR']}")
+          p = {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":text}}]}
+          urllib.request.urlopen(urllib.request.Request(os.environ["SLACK_WEBHOOK_URL"],
+            data=json.dumps(p).encode(), headers={"Content-type":"application/json"}))
+          PY
 
       - name: Notify Slack on Failure
         if: failure() || steps.backmerge.outputs.result == 'failed'
@@ -250,8 +277,20 @@ jobs:
           PR_TITLE: ${{ inputs.pr_title }}
           PR_URL: ${{ inputs.pr_url }}
           PR_NUMBER: ${{ inputs.pr_number }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-type: application/json' \
-              -d "{\"blocks\":[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"❌ *Back-merge falló — merge manual requerido*\n*Repo:* ${{ github.repository }}\n*PR origen:* <${PR_URL}|#${PR_REF} - ${PR_TITLE}>\n*Logs:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|ver detalles>\n*Actor:* ${{ github.actor }}\"}}]}"
-          fi
+          [ -n "$SLACK_WEBHOOK_URL" ] || exit 0
+          python3 - <<'PY'
+          import os, json, urllib.request
+          n, u, t = os.environ.get("PR_NUMBER",""), os.environ.get("PR_URL",""), os.environ.get("PR_TITLE","")
+          origin = f"<{u}|#{n} - {t}>" if n else f"push directo <{os.environ['COMMIT_URL']}|`{os.environ['COMMIT_SHA'][:7]}`>"
+          text = (f"❌ *Back-merge falló — merge manual requerido*\n*Repo:* {os.environ['REPO']}\n*Origen:* {origin}\n"
+                  f"*Logs:* <{os.environ['RUN_URL']}|ver detalles>\n*Actor:* {os.environ['ACTOR']}")
+          p = {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":text}}]}
+          urllib.request.urlopen(urllib.request.Request(os.environ["SLACK_WEBHOOK_URL"],
+            data=json.dumps(p).encode(), headers={"Content-type":"application/json"}))
+          PY
