@@ -28,6 +28,11 @@ on:
         required: false
         type: string
         default: 'argo.thecosmosproject.com'
+      runner:
+        description: 'Runner donde corre (fase 2: oxiacore-runner). Default ubuntu-latest.'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
     secrets:
       gcp_credentials:
         required: true
@@ -44,7 +49,7 @@ env:
 jobs:
   build-and-push:
     name: Build & Push Image
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     outputs:
       image_tag: ${{ steps.meta.outputs.version }}
       full_image: ${{ steps.meta.outputs.full_image }}
@@ -97,7 +102,7 @@ jobs:
 
   update-manifests:
     name: Update Manifests (GitOps)
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: build-and-push
 
     steps:
@@ -158,7 +163,7 @@ jobs:
 
   deploy-to-gke:
     name: Deploy to GKE
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     needs: [build-and-push, update-manifests]
 
     steps:
@@ -175,10 +180,13 @@ jobs:
             exit 0
           fi
 
-          # Instalar ArgoCD CLI
-          curl -sSL -o /usr/local/bin/argocd \
-            https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-          chmod +x /usr/local/bin/argocd
+          # Instalar ArgoCD CLI solo si no está (en oxiacore-runner ya viene
+          # horneado; /usr/local/bin no es escribible por el usuario no-root).
+          if ! command -v argocd >/dev/null 2>&1; then
+            curl -sSL -o /usr/local/bin/argocd \
+              https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+            chmod +x /usr/local/bin/argocd
+          fi
 
           # Verificar si existe la app {service_name}-prod
           ARGOCD_APP="${{ inputs.service_name }}-prod"
