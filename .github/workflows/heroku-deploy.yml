@@ -52,6 +52,11 @@ on:
         required: false
         type: string
         default: ''
+      runner:
+        description: 'Runner donde corre (fase 2: oxiacore-runner). Default ubuntu-latest.'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
     secrets:
       heroku_api_key:
         required: true
@@ -68,7 +73,7 @@ jobs:
   deploy-test:
     name: Deploy → ${{ inputs.app_test }} (test)
     if: github.ref == 'refs/heads/test'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -132,7 +137,7 @@ jobs:
   deploy-prod:
     name: Deploy → ${{ inputs.app_prod }} (prod)
     if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v4
         with:

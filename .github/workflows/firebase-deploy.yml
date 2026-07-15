@@ -73,6 +73,11 @@ on:
         required: false
         type: string
         default: '20'
+      runner:
+        description: 'Runner donde corre el deploy (fase 2: oxiacore-runner). Default ubuntu-latest.'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
     secrets:
       sa_prod:
         required: true
@@ -85,7 +90,7 @@ jobs:
   deploy-test:
     name: Deploy → ${{ inputs.project_test }} (test)
     if: github.ref == 'refs/heads/test'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -134,7 +139,7 @@ jobs:
   deploy-prod:
     name: Deploy → ${{ inputs.project_prod }} (prod)
     if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -54,6 +54,11 @@ on:
         type: string
         required: false
         default: ''
+      runner:
+        description: 'Runner donde corre (fase 2: oxiacore-runner). Default ubuntu-latest.'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
     secrets:
       repo_token:
         required: true
@@ -62,7 +67,7 @@ on:
 
 jobs:
   backmerge:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
 
     # Cola por repo: si se mergean 2 PRs a master casi seguidos, el segundo back-merge
     # ESPERA al primero en vez de correr en paralelo y pisarlo (push rechazado por
