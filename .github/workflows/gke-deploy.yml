@@ -106,6 +106,25 @@ jobs:
     needs: build-and-push
 
     steps:
+      # Espera a que GitHub responda antes de clonar. actions/checkout reintenta ~3
+      # veces en ~30s: no alcanza para una caida de GitHub, y al fallar este job la
+      # imagen queda buildeada en Artifact Registry pero el bump NUNCA ocurre -> el
+      # deploy se pierde EN SILENCIO (el build figura verde y prod queda atras).
+      # Paso el 2026-07-16: GitHub devolvia su pagina de error ("Unicorn") al clonar
+      # manifiestos-kubernetes y hubo que bumpear a mano prod y test.
+      - name: Wait for GitHub availability
+        run: |
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 https://api.github.com/rate_limit || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "✅ GitHub disponible (intento ${i})"
+              exit 0
+            fi
+            echo "⏳ GitHub no disponible (HTTP ${code}) - intento ${i}/12, esperando 20s..."
+            sleep 20
+          done
+          echo "::warning::GitHub sigue degradado tras ~4 min; se intenta el checkout igual"
+
       - name: Checkout manifests repository
         uses: actions/checkout@v4
         with:
@@ -160,6 +179,30 @@ jobs:
           git push origin main
 
           echo "✅ Manifests repository updated"
+
+      # Sin esta alerta el fallo es SILENCIOSO: build verde + imagen en Artifact
+      # Registry, pero sin bump ArgoCD no despliega nada y el entorno queda en la
+      # imagen anterior sin que nadie se entere (solo el rojo en Actions).
+      - name: Notify Slack on Failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
+              -d '{
+                "blocks": [
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "⚠️ *Bump de manifiestos FALLIDO — deploy NO aplicado*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Imagen:* `${{ needs.build-and-push.outputs.image_tag }}`\n*Actor:* ${{ github.actor }}\n\nLa imagen se construyó y subió a Artifact Registry, pero *no se actualizó el manifiesto*: ArgoCD sigue con la imagen anterior. Re-ejecutar el workflow o bumpear el tag a mano en `manifiestos-kubernetes`.\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
+                    }
+                  }
+                ]
+              }'
+          fi
 
   deploy-to-gke:
     name: Deploy to GKE
