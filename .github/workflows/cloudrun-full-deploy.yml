@@ -33,6 +33,33 @@ on:
         required: false
         type: boolean
         default: true
+      # --- Red / egress (opt-in). Para salir por una IP estática (Cloud NAT):
+      # egress de todo el trafico por la VPC -> el NAT usa la IP fija reservada.
+      # Vacio = comportamiento anterior (egress gestionado por Google, IP efimera).
+      vpc_network:
+        required: false
+        type: string
+        default: ''
+      vpc_subnet:
+        required: false
+        type: string
+        default: ''
+      vpc_egress:
+        required: false
+        type: string
+        default: 'all-traffic'   # solo aplica si vpc_network != ''
+      # Ingress: 'all' (directo/Cloudflare) | 'internal-and-cloud-load-balancing' (solo LB).
+      # Vacio = no se toca (conserva lo que ya tenga el servicio).
+      ingress:
+        required: false
+        type: string
+        default: ''
+      # 'true' | 'false' | '' (vacio = no se toca). Para APIs publicas detras de
+      # Cloudflare/LB que autentican a nivel de app, usar 'true'.
+      allow_unauthenticated:
+        required: false
+        type: string
+        default: ''
     secrets:
       gcp_credentials:
         required: true
@@ -74,46 +101,56 @@ jobs:
 
     - name: Build and push image
       run: |
-        docker build -f ${{ inputs.dockerfile }} -t "${{ steps.tag.outputs.url }}" .
+        # Resuelve el Dockerfile tolerando el casing (Linux es case-sensitive).
+        # Usa el input si existe; si no, cae a Dockerfile/dockerfile en la raiz.
+        DF="${{ inputs.dockerfile }}"
+        if [ ! -f "$DF" ]; then
+          if [ -f "Dockerfile" ]; then DF="Dockerfile"
+          elif [ -f "dockerfile" ]; then DF="dockerfile"
+          else echo "::error::No se encontro Dockerfile (probé '${{ inputs.dockerfile }}', 'Dockerfile', 'dockerfile')"; exit 1
+          fi
+        fi
+        echo "Usando Dockerfile: $DF"
+        docker build -f "$DF" -t "${{ steps.tag.outputs.url }}" .
         docker push "${{ steps.tag.outputs.url }}"
 
     - name: Deploy to Cloud Run
       run: |
+        # Flags opt-in: si el input esta vacio no se agrega -> no cambia el comportamiento
+        # de los repos que ya usan este reusable.
+        EXTRA=""
+        if [ -n "${{ inputs.vpc_network }}" ]; then
+          EXTRA="$EXTRA --network=${{ inputs.vpc_network }} --subnet=${{ inputs.vpc_subnet }} --vpc-egress=${{ inputs.vpc_egress }}"
+        fi
+        if [ -n "${{ inputs.ingress }}" ]; then
+          EXTRA="$EXTRA --ingress=${{ inputs.ingress }}"
+        fi
+        if [ "${{ inputs.allow_unauthenticated }}" = "true" ]; then
+          EXTRA="$EXTRA --allow-unauthenticated"
+        elif [ "${{ inputs.allow_unauthenticated }}" = "false" ]; then
+          EXTRA="$EXTRA --no-allow-unauthenticated"
+        fi
+        echo "Flags extra de deploy: ${EXTRA:-(ninguno)}"
+
+        ENV_FLAG=""
         if [ "${{ inputs.use_secret_manager }}" = "true" ]; then
           SECRET_NAME="${{ inputs.service_name }}-${{ inputs.environment }}"
-
           SECRET_DATA=$(gcloud secrets versions access latest \
             --secret="${SECRET_NAME}" \
             --project=central-secrets 2>/dev/null || echo "{}")
-
           if [[ "$SECRET_DATA" != "{}" ]] && [[ -n "$SECRET_DATA" ]]; then
             echo "$SECRET_DATA" > /tmp/env-vars.json
-
-            gcloud run deploy ${{ inputs.service_name }} \
-              --image ${{ steps.tag.outputs.url }} \
-              --platform managed \
-              --region ${{ inputs.region }} \
-              --project ${{ inputs.project_id }} \
-              --timeout=${{ inputs.timeout }} \
-              --env-vars-file /tmp/env-vars.json \
-              --quiet
-
-            rm /tmp/env-vars.json
-          else
-            gcloud run deploy ${{ inputs.service_name }} \
-              --image ${{ steps.tag.outputs.url }} \
-              --platform managed \
-              --region ${{ inputs.region }} \
-              --project ${{ inputs.project_id }} \
-              --timeout=${{ inputs.timeout }} \
-              --quiet
+            ENV_FLAG="--env-vars-file /tmp/env-vars.json"
           fi
-        else
-          gcloud run deploy ${{ inputs.service_name }} \
-            --image ${{ steps.tag.outputs.url }} \
-            --platform managed \
-            --region ${{ inputs.region }} \
-            --project ${{ inputs.project_id }} \
-            --timeout=${{ inputs.timeout }} \
-            --quiet
         fi
+
+        gcloud run deploy ${{ inputs.service_name }} \
+          --image ${{ steps.tag.outputs.url }} \
+          --platform managed \
+          --region ${{ inputs.region }} \
+          --project ${{ inputs.project_id }} \
+          --timeout=${{ inputs.timeout }} \
+          $ENV_FLAG $EXTRA \
+          --quiet
+
+        rm -f /tmp/env-vars.json
