@@ -41,6 +41,13 @@ on:
         required: false
         type: string
         default: ''
+      # Env vars extra a mergear SOBRE el secret (formato "K=V,K2=V2"). Util para
+      # overrides por-deploy sin tocar el secret compartido (ej. NODE_ENV=staging
+      # en un deploy idle para no activar schedulers).
+      extra_env_vars:
+        required: false
+        type: string
+        default: ''
       # --- Red / egress (opt-in). Para salir por una IP estática (Cloud NAT):
       # egress de todo el trafico por la VPC -> el NAT usa la IP fija reservada.
       # Vacio = comportamiento anterior (egress gestionado por Google, IP efimera).
@@ -141,16 +148,33 @@ jobs:
         echo "Flags extra de deploy: ${EXTRA:-(ninguno)}"
 
         ENV_FLAG=""
+        ENVFILE=/tmp/env-vars.json
+        echo "{}" > "$ENVFILE"
         if [ "${{ inputs.use_secret_manager }}" = "true" ]; then
           SECRET_NAME="${{ inputs.secret_name }}"
           [ -z "$SECRET_NAME" ] && SECRET_NAME="${{ inputs.service_name }}-${{ inputs.environment }}"
           SECRET_DATA=$(gcloud secrets versions access latest \
             --secret="${SECRET_NAME}" \
             --project=central-secrets 2>/dev/null || echo "{}")
-          if [[ "$SECRET_DATA" != "{}" ]] && [[ -n "$SECRET_DATA" ]]; then
-            echo "$SECRET_DATA" > /tmp/env-vars.json
-            ENV_FLAG="--env-vars-file /tmp/env-vars.json"
-          fi
+          [ -n "$SECRET_DATA" ] && echo "$SECRET_DATA" > "$ENVFILE"
+        fi
+        # Mergear extra_env_vars SOBRE el secret (override por-deploy).
+        if [ -n "${{ inputs.extra_env_vars }}" ]; then
+          EXTRA_ENV="${{ inputs.extra_env_vars }}" python3 - "$ENVFILE" <<'PY'
+import json, os, sys
+f = sys.argv[1]
+try: d = json.load(open(f))
+except Exception: d = {}
+for pair in os.environ.get('EXTRA_ENV', '').split(','):
+    if '=' in pair:
+        k, v = pair.split('=', 1)
+        d[k.strip()] = v.strip()
+json.dump(d, open(f, 'w'))
+PY
+        fi
+        # Usar el file solo si tiene contenido real (no solo "{}").
+        if [ "$(tr -d '[:space:]' < "$ENVFILE")" != "{}" ]; then
+          ENV_FLAG="--env-vars-file $ENVFILE"
         fi
 
         gcloud run deploy ${{ inputs.service_name }} \
