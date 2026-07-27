@@ -33,6 +33,14 @@ on:
         required: false
         type: boolean
         default: true
+      # Nombre del secret en central-secrets. Default '' -> se arma como
+      # '<service_name>-<environment>'. Se pasa explicito cuando el nombre del
+      # servicio y el del secret difieren (ej. service 'juno' con secret
+      # 'ganaya-backend-dev' durante una migracion).
+      secret_name:
+        required: false
+        type: string
+        default: ''
       # --- Red / egress (opt-in). Para salir por una IP estática (Cloud NAT):
       # egress de todo el trafico por la VPC -> el NAT usa la IP fija reservada.
       # Vacio = comportamiento anterior (egress gestionado por Google, IP efimera).
@@ -134,7 +142,8 @@ jobs:
 
         ENV_FLAG=""
         if [ "${{ inputs.use_secret_manager }}" = "true" ]; then
-          SECRET_NAME="${{ inputs.service_name }}-${{ inputs.environment }}"
+          SECRET_NAME="${{ inputs.secret_name }}"
+          [ -z "$SECRET_NAME" ] && SECRET_NAME="${{ inputs.service_name }}-${{ inputs.environment }}"
           SECRET_DATA=$(gcloud secrets versions access latest \
             --secret="${SECRET_NAME}" \
             --project=central-secrets 2>/dev/null || echo "{}")
