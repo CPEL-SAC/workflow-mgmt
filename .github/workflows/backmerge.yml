@@ -113,8 +113,8 @@ jobs:
           PR_REF="${PR_NUMBER:-${COMMIT_SHA:0:7}}"
 
           UPDATED=""        # ramas pusheadas con éxito
-          PRS=""            # "rama:url" de PRs creados para resolución manual
-          ANY_PR=false
+          CONFLICTOS=""     # ramas que quedaron sin bajar y por qué
+          ANY_REVIEW=false
           ANY_FAIL=false
 
           # ── Sintaxis sobre el árbol actual ───────────────────────────────
@@ -128,6 +128,15 @@ jobs:
               fi
             done < <(find "$SRC_PATH" -name "$SYNTAX_PATTERN" -type f 2>/dev/null)
             [ "$bad" = false ]
+          }
+
+          # ── Marcadores de conflicto en el árbol ──────────────────────────
+          # Sólo `<<<<<<<` y `>>>>>>>` a principio de línea: `=======` aparece de verdad en
+          # markdown y en comentarios, y daría falsos positivos.
+          assert_sin_marcadores() {
+            local hits
+            hits=$(grep -rlE '^(<{7}|>{7})( |$)' "$SRC_PATH" 2>/dev/null | head -20)
+            [ -z "$hits" ] || { echo "Marcadores de conflicto en:"; echo "$hits"; return 1; }
           }
 
           # ── Back-merge de master a UNA rama ──────────────────────────────
@@ -150,32 +159,42 @@ jobs:
 
             echo "🔀 Back-merge master → ${TB}"
             if ! git merge origin/master --no-ff -m "chore: auto back-merge ${REF} from master to ${TB}"; then
-              echo "::warning::Conflictos en ${TB}; creando PR para resolución manual."
-              git merge --abort
-              local TMP="backmerge/${REF}-to-${TB}"
-              git checkout -B "$TMP"
-              git merge origin/master --no-ff --no-commit || true
-              git add -A
-              git commit -m "chore: back-merge ${REF} from master to ${TB} (con conflictos)"
-              git push -u origin "$TMP" --force-with-lease
-              local URL
-              URL=$(gh pr create --base "$TB" --head "$TMP" \
-                --title "Back-merge: ${REF} → ${TB} (conflictos)" \
-                --body "Back-merge automático master→${TB} con conflictos. Resolver manualmente. PR origen #${PR_REF} (${REF})." 2>/dev/null)
-              PRS="${PRS}${TB}: ${URL}\n"; ANY_PR=true
+              # NO se crea rama ni PR. Antes se hacía `git merge --no-commit` + `git add -A` +
+              # commit, lo que dejaba los marcadores `<<<<<<<` DENTRO del commit y pusheaba una
+              # rama con código que no compila, más un PR que parecía listo para mergear.
+              #
+              # Pasó de verdad: el 31-jul-2026 las 6 ramas `backmerge/*` más recientes de
+              # metabet-backend tenían marcadores commiteados y su `src/routes/metabet.js` no
+              # parseaba (`SyntaxError: Unexpected token '<<'`). Mergear cualquiera de esas PRs
+              # dejaba el backend sin arrancar. Ninguna llegó a mergearse por suerte, no por diseño.
+              #
+              # Un conflicto de merge no se puede "empaquetar" en un commit sin resolverlo: o se
+              # resuelve, o se avisa. Acá se avisa, fuerte y con los archivos.
+              local FILES
+              FILES=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+              git merge --abort || true
+              echo "::error::Conflictos bajando master a ${TB}. Archivos: ${FILES}"
+              CONFLICTOS="${CONFLICTOS}• ${TB} — resolver a mano: ${FILES}\n"
+              ANY_REVIEW=true
               return 0
             fi
 
             if ! check_syntax; then
-              echo "::warning::Errores de sintaxis en ${TB}; creando PR."
-              local TMP="backmerge/${REF}-to-${TB}-syntax"
-              git checkout -B "$TMP"
-              git push -u origin "$TMP" --force-with-lease
-              local URL
-              URL=$(gh pr create --base "$TB" --head "$TMP" \
-                --title "Back-merge: ${REF} → ${TB} (sintaxis)" \
-                --body "Back-merge automático master→${TB} mergeó limpio pero node --check falló. Revisar. PR origen #${PR_REF}." 2>/dev/null)
-              PRS="${PRS}${TB}: ${URL}\n"; ANY_PR=true
+              # Mismo criterio: si el merge salió limpio pero el resultado no parsea, tampoco se
+              # pushea. Empujar código roto a una rama sólo mueve el problema de lugar.
+              echo "::error::${TB} mergeó limpio pero node --check falló; no se pushea."
+              CONFLICTOS="${CONFLICTOS}• ${TB} — el merge fue limpio pero el resultado no parsea\n"
+              ANY_REVIEW=true
+              return 0
+            fi
+
+            # Cinturón y tirantes: aunque el merge no reporte conflicto, nunca pushear un árbol
+            # con marcadores. Cubre el caso de que alguien los haya commiteado antes en master o
+            # en la rama destino, que es como se propagan sin que nadie lo note.
+            if ! assert_sin_marcadores; then
+              echo "::error::${TB} tiene marcadores de conflicto en el árbol; no se pushea."
+              CONFLICTOS="${CONFLICTOS}• ${TB} — marcadores de conflicto en el árbol\n"
+              ANY_REVIEW=true
               return 0
             fi
 
@@ -207,13 +226,16 @@ jobs:
           # ── Resultado agregado ───────────────────────────────────────────
           {
             echo "updated=${UPDATED}"
-            echo "prs<<EOF"; printf '%b' "$PRS"; echo "EOF"
+            echo "conflictos<<EOF"; printf '%b' "$CONFLICTOS"; echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
           if [ "$ANY_FAIL" = true ]; then
             echo "result=failed" >> "$GITHUB_OUTPUT"; exit 1
-          elif [ "$ANY_PR" = true ]; then
-            echo "result=needs_review" >> "$GITHUB_OUTPUT"
+          elif [ "$ANY_REVIEW" = true ]; then
+            # Sale con 1 a propósito: antes esto quedaba verde porque "ya se creó el PR", y un
+            # back-merge que no bajó es un back-merge que no pasó. La rama destino se queda atrás
+            # en silencio y el conflicto crece hasta que alguien lo pisa.
+            echo "result=needs_review" >> "$GITHUB_OUTPUT"; exit 1
           else
             echo "result=success" >> "$GITHUB_OUTPUT"
           fi
@@ -248,15 +270,17 @@ jobs:
             data=json.dumps(p).encode(), headers={"Content-type":"application/json"}))
           PY
 
+      # `always()` es imprescindible: el step de back-merge ahora sale con 1 cuando algo quedó
+      # sin bajar, y sin esto GitHub saltearía el aviso justo en el caso en que hace falta.
       - name: Notify Slack on Needs Review
-        if: steps.backmerge.outputs.result == 'needs_review'
+        if: always() && steps.backmerge.outputs.result == 'needs_review'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
           PR_TITLE: ${{ inputs.pr_title }}
           PR_URL: ${{ inputs.pr_url }}
           PR_NUMBER: ${{ inputs.pr_number }}
           UPDATED: ${{ steps.backmerge.outputs.updated }}
-          PRS: ${{ steps.backmerge.outputs.prs }}
+          CONFLICTOS: ${{ steps.backmerge.outputs.conflictos }}
           COMMIT_SHA: ${{ github.sha }}
           COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
           REPO: ${{ github.repository }}
@@ -267,16 +291,20 @@ jobs:
           import os, json, urllib.request
           n, u, t = os.environ.get("PR_NUMBER",""), os.environ.get("PR_URL",""), os.environ.get("PR_TITLE","")
           origin = f"<{u}|#{n} - {t}>" if n else f"push directo <{os.environ['COMMIT_URL']}|`{os.environ['COMMIT_SHA'][:7]}`>"
-          text = (f"⚠️ *Back-merge requiere revisión manual*\n*Repo:* {os.environ['REPO']}\n*Origen:* {origin}\n"
+          text = (f"⚠️ *Back-merge requiere merge MANUAL*\n*Repo:* {os.environ['REPO']}\n*Origen:* {origin}\n"
                   f"*Sincronizadas OK:* {os.environ.get('UPDATED','').strip() or 'ninguna'}\n"
-                  f"*PRs a resolver:*\n{os.environ.get('PRS','')}\n*Actor:* {os.environ['ACTOR']}")
+                  f"*Sin bajar:*\n{os.environ.get('CONFLICTOS','')}\n"
+                  f"Resolver en local: `git checkout <rama> && git pull && git merge master`\n"
+                  f"*Actor:* {os.environ['ACTOR']}")
           p = {"blocks":[{"type":"section","text":{"type":"mrkdwn","text":text}}]}
           urllib.request.urlopen(urllib.request.Request(os.environ["SLACK_WEBHOOK_URL"],
             data=json.dumps(p).encode(), headers={"Content-type":"application/json"}))
           PY
 
+      # Se excluye `needs_review` explícitamente: ahora ese caso también sale con 1, así que
+      # `failure()` es true y sin este filtro llegarían DOS avisos por el mismo evento.
       - name: Notify Slack on Failure
-        if: failure() || steps.backmerge.outputs.result == 'failed'
+        if: (failure() || steps.backmerge.outputs.result == 'failed') && steps.backmerge.outputs.result != 'needs_review'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
           PR_TITLE: ${{ inputs.pr_title }}
