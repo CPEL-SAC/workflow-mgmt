@@ -75,6 +75,33 @@ on:
         required: false
         type: string
         default: ''
+      # --- Recursos y escalado (opt-in). Vacio = se conserva lo que ya tenga el
+      # servicio, o el default de Cloud Run si es nuevo (512Mi / 1 CPU / min 0).
+      # Declararlos aca evita que un deploy revierta un ajuste hecho a mano.
+      memory:
+        required: false
+        type: string
+        default: ''
+      cpu:
+        required: false
+        type: string
+        default: ''
+      # min_instances > 0 elimina los arranques en frio (paridad con un dyno
+      # siempre activo), a cambio de facturar la instancia en reposo.
+      min_instances:
+        required: false
+        type: string
+        default: ''
+      max_instances:
+        required: false
+        type: string
+        default: ''
+      # Requests simultaneas por instancia. Bajarla acota la memoria por instancia
+      # cuando la app acepta payloads grandes.
+      concurrency:
+        required: false
+        type: string
+        default: ''
     secrets:
       gcp_credentials:
         required: true
@@ -144,6 +171,21 @@ jobs:
           EXTRA="$EXTRA --allow-unauthenticated"
         elif [ "${{ inputs.allow_unauthenticated }}" = "false" ]; then
           EXTRA="$EXTRA --no-allow-unauthenticated"
+        fi
+        if [ -n "${{ inputs.memory }}" ]; then
+          EXTRA="$EXTRA --memory=${{ inputs.memory }}"
+        fi
+        if [ -n "${{ inputs.cpu }}" ]; then
+          EXTRA="$EXTRA --cpu=${{ inputs.cpu }}"
+        fi
+        if [ -n "${{ inputs.min_instances }}" ]; then
+          EXTRA="$EXTRA --min-instances=${{ inputs.min_instances }}"
+        fi
+        if [ -n "${{ inputs.max_instances }}" ]; then
+          EXTRA="$EXTRA --max-instances=${{ inputs.max_instances }}"
+        fi
+        if [ -n "${{ inputs.concurrency }}" ]; then
+          EXTRA="$EXTRA --concurrency=${{ inputs.concurrency }}"
         fi
         echo "Flags extra de deploy: ${EXTRA:-(ninguno)}"
 
