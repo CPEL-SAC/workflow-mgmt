@@ -28,6 +28,14 @@ on:
         required: false
         type: string
         default: 'argo.thecosmosproject.com'
+      # Entorno de la app ArgoCD: se sincroniza `<service_name>-<sufijo>`.
+      # El caller debe pasar 'test' en su job de test; si no, el deploy de test
+      # termina sincronizando la app de PRODUCCION (era el comportamiento fijo
+      # anterior). Default 'prod' para no romper a los repos que aun no lo pasan.
+      argocd_app_suffix:
+        required: false
+        type: string
+        default: 'prod'
       runner:
         description: 'Runner donde corre (fase 2: oxiacore-runner). Default ubuntu-latest.'
         required: false
@@ -176,7 +184,32 @@ jobs:
           Triggered by: ${{ github.actor }}
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          git push origin main
+          # Varios repos empujan al MISMO repo de manifiestos, asi que dos deploys
+          # simultaneos se pisan: el segundo clono antes del push del primero y su
+          # push sale rechazado ("cannot lock ref 'refs/heads/main': is at X but
+          # expected Y"). Sin reintento eso deja la imagen en Artifact Registry pero
+          # el manifiesto sin bumpear, o sea build verde y deploy NO aplicado.
+          # Rebase + reintento con espera escalonada: el commit es un cambio de una
+          # linea sobre un archivo propio del servicio, asi que rebasar es seguro
+          # (dos servicios distintos no tocan el mismo archivo).
+          PUSHED=false
+          for i in 1 2 3 4 5; do
+            if git push origin main 2>&1; then
+              PUSHED=true
+              break
+            fi
+            echo "⚠️ Push rechazado (intento $i/5) — alguien mas actualizo el repo. Rebasando..."
+            git pull --rebase origin main || {
+              echo "::error::Conflicto al rebasar; requiere revision manual"
+              exit 1
+            }
+            sleep $(( (RANDOM % 5) + i * 2 ))
+          done
+
+          if [ "$PUSHED" != "true" ]; then
+            echo "::error::No se pudo pushear el bump tras 5 intentos"
+            exit 1
+          fi
 
           echo "✅ Manifests repository updated"
 
@@ -231,8 +264,12 @@ jobs:
             chmod +x /usr/local/bin/argocd
           fi
 
-          # Verificar si existe la app {service_name}-prod
-          ARGOCD_APP="${{ inputs.service_name }}-prod"
+          # El sufijo define el ENTORNO de la app ArgoCD. Estaba fijo en '-prod',
+          # asi que un deploy de test terminaba haciendo 'app sync --force' sobre
+          # la app de PRODUCCION. El caller lo pasa por `argocd_app_suffix`; el
+          # default sigue siendo 'prod' para no cambiar el comportamiento de los
+          # repos que todavia no lo declaran.
+          ARGOCD_APP="${{ inputs.service_name }}-${{ inputs.argocd_app_suffix }}"
           echo "🔍 Checking ArgoCD app: ${ARGOCD_APP}"
 
           if argocd app get "${ARGOCD_APP}" \
@@ -258,12 +295,29 @@ jobs:
           ARGOCD_APP="${{ steps.argocd_check.outputs.argocd_app }}"
           echo "🚀 Syncing ArgoCD app: ${ARGOCD_APP}"
 
-          argocd app sync "${ARGOCD_APP}" \
+          # Las apps tienen auto-sync (automated + selfHeal), asi que ArgoCD suele
+          # arrancar su propia operacion apenas ve el bump del manifiesto. Si este
+          # sync llega mientras esa operacion corre, falla con
+          # "FailedPrecondition: another operation is already in progress" y tumbaba
+          # el job aunque el deploy estuviera saliendo bien.
+          # No es un error: hay una sync en curso que hace exactamente lo mismo. Se
+          # deja pasar y el 'app wait' de abajo es el que decide si funciono.
+          SYNC_OUT=$(argocd app sync "${ARGOCD_APP}" \
             --server "${ARGOCD_SERVER}" \
             --auth-token "${ARGOCD_TOKEN}" \
             --grpc-web \
             --force \
-            --timeout 30
+            --timeout 30 2>&1) || SYNC_RC=$?
+          echo "${SYNC_OUT}"
+
+          if [ -n "${SYNC_RC:-}" ]; then
+            if echo "${SYNC_OUT}" | grep -q "another operation is already in progress"; then
+              echo "ℹ️ Ya habia una sync en curso (auto-sync); se espera a que termine."
+            else
+              echo "::error::argocd app sync fallo (rc=${SYNC_RC})"
+              exit "${SYNC_RC}"
+            fi
+          fi
 
           echo "⏳ Waiting for app to be Healthy..."
           argocd app wait "${ARGOCD_APP}" \
