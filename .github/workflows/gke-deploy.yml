@@ -29,13 +29,15 @@ on:
         type: string
         default: 'argo.thecosmosproject.com'
       # Entorno de la app ArgoCD: se sincroniza `<service_name>-<sufijo>`.
-      # El caller debe pasar 'test' en su job de test; si no, el deploy de test
-      # termina sincronizando la app de PRODUCCION (era el comportamiento fijo
-      # anterior). Default 'prod' para no romper a los repos que aun no lo pasan.
+      # Vacio (default) = se DEDUCE de project_id, que ya es la señal de entorno
+      # del reusable (tambien define la ruta del manifiesto y el registry):
+      #   apueston-test -> 'test'   ·   apueston-admin / cpelsac -> 'prod'
+      # Asi ningun caller tiene que declarar nada. Se pasa explicito solo si algun
+      # repo se sale de esa convencion.
       argocd_app_suffix:
         required: false
         type: string
-        default: 'prod'
+        default: ''
       runner:
         description: 'Runner donde corre (fase 2: oxiacore-runner). Default ubuntu-latest.'
         required: false
@@ -264,12 +266,24 @@ jobs:
             chmod +x /usr/local/bin/argocd
           fi
 
-          # El sufijo define el ENTORNO de la app ArgoCD. Estaba fijo en '-prod',
-          # asi que un deploy de test terminaba haciendo 'app sync --force' sobre
-          # la app de PRODUCCION. El caller lo pasa por `argocd_app_suffix`; el
-          # default sigue siendo 'prod' para no cambiar el comportamiento de los
-          # repos que todavia no lo declaran.
-          ARGOCD_APP="${{ inputs.service_name }}-${{ inputs.argocd_app_suffix }}"
+          # El sufijo define el ENTORNO de la app ArgoCD. Estaba fijo en '-prod', asi
+          # que un deploy de test terminaba haciendo 'app sync --force' sobre la app
+          # de PRODUCCION.
+          # Se deduce de project_id (misma señal que ya usa la ruta del manifiesto y
+          # el registry), asi ningun caller necesita declarar nada:
+          #   apueston-test -> test   ·   apueston-admin / cpelsac -> prod
+          SUFFIX="${{ inputs.argocd_app_suffix }}"
+          if [ -z "${SUFFIX}" ]; then
+            case "${{ inputs.project_id }}" in
+              *-test) SUFFIX="test" ;;
+              *)      SUFFIX="prod" ;;
+            esac
+            echo "🏷️ Entorno deducido de project_id '${{ inputs.project_id }}' → sufijo '${SUFFIX}'"
+          else
+            echo "🏷️ Sufijo declarado por el caller → '${SUFFIX}'"
+          fi
+
+          ARGOCD_APP="${{ inputs.service_name }}-${SUFFIX}"
           echo "🔍 Checking ArgoCD app: ${ARGOCD_APP}"
 
           if argocd app get "${ARGOCD_APP}" \
