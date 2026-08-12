@@ -102,6 +102,16 @@ on:
         required: false
         type: string
         default: ''
+      # Ruteo del trafico tras el deploy. Cloud Run RESPETA un pin explicito a una
+      # revision (spec.traffic con revisionName en vez de latestRevision): si alguien
+      # fijo una revision para hacer rollback, los deploys siguientes crean la revision
+      # nueva pero NO la sirven. El pipeline queda en verde y produccion nunca cambia.
+      # Con 'true' el deploy fuerza el ruteo a la ultima revision lista.
+      # Vacio = no se toca (el que ya use latestRevision sigue igual).
+      traffic_to_latest:
+        required: false
+        type: string
+        default: ''
     secrets:
       gcp_credentials:
         required: true
@@ -219,3 +229,27 @@ jobs:
           --quiet
 
         rm -f /tmp/env-vars.json
+
+        # --- Ruteo del trafico ---------------------------------------------------
+        # `gcloud run deploy` NO pisa un pin explicito a una revision: es a proposito
+        # (si fijaste una revision buena para salir de un incidente, el proximo deploy
+        # no te vuelve a meter el codigo roto). El efecto secundario es que un servicio
+        # fijado deja de recibir despliegues EN SILENCIO: el job da verde, la revision
+        # queda Ready, y nadie sirve nada nuevo.
+        if [ "${{ inputs.traffic_to_latest }}" = "true" ]; then
+          echo "Ruteando el 100% del trafico a la ultima revision..."
+          gcloud run services update-traffic ${{ inputs.service_name }} \
+            --to-latest \
+            --region ${{ inputs.region }} \
+            --project ${{ inputs.project_id }} \
+            --quiet
+        else
+          # Sin traffic_to_latest, al menos AVISAR si el servicio esta fijado: un deploy
+          # que pasa pero no llega a produccion es el peor tipo de verde.
+          PINNED=$(gcloud run services describe ${{ inputs.service_name }} \
+            --region ${{ inputs.region }} --project ${{ inputs.project_id }} \
+            --format="value(spec.traffic[0].revisionName)" 2>/dev/null || true)
+          if [ -n "${PINNED}" ]; then
+            echo "::warning::El servicio '${{ inputs.service_name }}' tiene el trafico FIJADO a la revision '${PINNED}'. La revision recien desplegada NO esta sirviendo. Usa traffic_to_latest: 'true' o corre 'gcloud run services update-traffic --to-latest'."
+          fi
+        fi
