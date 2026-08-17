@@ -175,6 +175,28 @@ jobs:
         run: npx env-cmd -f ${{ inputs.env_file_prod }} npm run build
       - name: Deploy to Firebase Hosting (prod)
         run: npx firebase-tools deploy --only hosting:${{ inputs.hosting_target_prod }} --project ${{ inputs.project_prod }} --non-interactive
+      # Exito solo en prod; los deploys a test no avisan (ruido).
+      - name: Notify Slack on Success
+        if: success()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
+              -d '{
+                "blocks": [
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "✅ *Firebase Deploy Exitoso (prod)*\n*Repo:* ${{ github.repository }}\n*Project:* ${{ inputs.project_prod }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver run>"
+                    }
+                  }
+                ]
+              }'
+          fi
+
       - name: Notify Slack on Failure
         if: failure()
         env:

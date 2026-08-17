@@ -104,8 +104,10 @@ jobs:
         echo "🌐 Service URL: ${SERVICE_URL}"
         echo "📋 Console: https://console.cloud.google.com/run/detail/${{ inputs.region }}/${{ inputs.service_name }}/source?project=${{ inputs.project_id }}"
 
+    # Exito solo en prod (master): los deploys a test son rutinarios y su
+    # volumen tapa los fallos, que son los que piden accion.
     - name: Notify Slack on Success
-      if: success()
+      if: success() && github.ref == 'refs/heads/master'
       env:
         SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
       run: |
