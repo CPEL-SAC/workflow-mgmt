@@ -38,9 +38,13 @@ on:
         description: 'Nombre de la app Heroku de prod'
         required: true
         type: string
+      # Opcional: hay repos cuyo entorno de test NO vive en Heroku (p. ej. sportsbook-backend,
+      # que despliega test a Cloud Run y solo usa Heroku en prod). Vacio = no se despliega a
+      # test, y el caller ni siquiera tiene que nombrar una app.
       app_test:
-        description: 'Nombre de la app Heroku de test'
-        required: true
+        description: 'Nombre de la app Heroku de test. Vacio = este repo no despliega a Heroku en test.'
+        required: false
+        default: ''
         type: string
       secret_prod:
         description: 'central-secrets/<secret> con las config vars de prod (opcional). Vacío = no sincronizar config.'
@@ -72,7 +76,9 @@ on:
 jobs:
   deploy-test:
     name: Deploy → ${{ inputs.app_test }} (test)
-    if: github.ref == 'refs/heads/test'
+    # Sin app_test no hay nada que desplegar: el job se saltea en vez de fallar
+    # intentando pushear a una app vacia.
+    if: github.ref == 'refs/heads/test' && inputs.app_test != ''
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@v4
