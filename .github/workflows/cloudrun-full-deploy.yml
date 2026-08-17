@@ -257,8 +257,7 @@ jobs:
         fi
 
     # Este reusable no notificaba NADA: un deploy fallido a Cloud Run pasaba
-    # desapercibido. Fallo -> siempre; exito -> solo prod (master), para no
-    # llenar el canal con deploys de test rutinarios.
+    # desapercibido. Ahora avisa exito y fallo, uno por despliegue real.
     - name: Notify Slack on Failure
       if: failure()
       env:
@@ -281,7 +280,7 @@ jobs:
         fi
 
     - name: Notify Slack on Success
-      if: success() && github.ref == 'refs/heads/master'
+      if: success()
       env:
         SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
       run: |

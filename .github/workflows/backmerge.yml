@@ -244,8 +244,12 @@ jobs:
       # es una var de shell local a ese step). Si vino de un PR se linkea el PR; si fue
       # push directo a master, se linkea el commit. El payload se arma con python3 para
       # escapar bien títulos con comillas.
+      # Solo avisa si REALMENTE bajo algo (`updated` trae las ramas pusheadas).
+      # Antes avisaba tambien cuando las ramas ya contenian master ("sin
+      # cambios"): con 19 repos, eso llenaba el canal de avisos de un
+      # back-merge que no hizo nada.
       - name: Notify Slack on Success
-        if: steps.backmerge.outputs.result == 'success'
+        if: steps.backmerge.outputs.result == 'success' && steps.backmerge.outputs.updated != ''
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
           PR_TITLE: ${{ inputs.pr_title }}

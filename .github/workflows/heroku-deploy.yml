@@ -130,6 +130,27 @@ jobs:
         run: |
           git push -f "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${APP}.git" HEAD:refs/heads/main
 
+      - name: Notify Slack on Success
+        if: success()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -s -X POST "$SLACK_WEBHOOK_URL" \\
+              -H 'Content-type: application/json' \\
+              -d '{
+                "blocks": [
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "✅ *Heroku Deploy Exitoso (test)*\\n*Repo:* ${{ github.repository }}\\n*App:* ${{ inputs.app_test }}\\n*Actor:* ${{ github.actor }}\\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver run>"
+                    }
+                  }
+                ]
+              }'
+          fi
+
       - name: Notify Slack on Failure
         if: failure()
         env:
@@ -194,7 +215,6 @@ jobs:
         run: |
           git push -f "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${APP}.git" HEAD:refs/heads/main
 
-      # Exito solo en prod; los deploys a test no avisan (ruido).
       - name: Notify Slack on Success
         if: success()
         env:
