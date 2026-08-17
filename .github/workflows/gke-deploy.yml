@@ -477,8 +477,12 @@ jobs:
           echo "| **Manifests Path** | ${{ inputs.project_id }}/${{ inputs.service_name }}/k8s |" >> $GITHUB_STEP_SUMMARY
           echo "| **Triggered by** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
 
+      # La condicion anterior era `use_argocd != 'true'`, que saltaba el aviso
+      # justo en la ruta normal (ArgoCD) -> los deploys OK nunca se notificaban.
+      # Ahora avisa en ambas rutas y en ambos entornos: cada aviso corresponde a
+      # UN despliegue real de ESTA app.
       - name: Notify Slack on Success
-        if: steps.argocd_check.outputs.use_argocd != 'true' && success()
+        if: success()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
         run: |

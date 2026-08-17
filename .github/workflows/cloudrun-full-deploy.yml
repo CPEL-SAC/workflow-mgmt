@@ -115,6 +115,8 @@ on:
     secrets:
       gcp_credentials:
         required: true
+      slack_webhook_url:
+        required: false
 
 jobs:
   build-and-deploy:
@@ -252,4 +254,48 @@ jobs:
           if [ -n "${PINNED}" ]; then
             echo "::warning::El servicio '${{ inputs.service_name }}' tiene el trafico FIJADO a la revision '${PINNED}'. La revision recien desplegada NO esta sirviendo. Usa traffic_to_latest: 'true' o corre 'gcloud run services update-traffic --to-latest'."
           fi
+        fi
+
+    # Este reusable no notificaba NADA: un deploy fallido a Cloud Run pasaba
+    # desapercibido. Ahora avisa exito y fallo, uno por despliegue real.
+    - name: Notify Slack on Failure
+      if: failure()
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+      run: |
+        if [ -n "$SLACK_WEBHOOK_URL" ]; then
+          curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d '{
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *Cloud Run Deploy Fallido*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
+                  }
+                }
+              ]
+            }'
+        fi
+
+    - name: Notify Slack on Success
+      if: success()
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
+      run: |
+        if [ -n "$SLACK_WEBHOOK_URL" ]; then
+          curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d '{
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *Cloud Run Deploy Exitoso (prod)*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver run>"
+                  }
+                }
+              ]
+            }'
         fi
