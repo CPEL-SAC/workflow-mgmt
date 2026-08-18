@@ -212,13 +212,28 @@ jobs:
             --project=central-secrets 2>/dev/null || echo "{}")
           [ -n "$SECRET_DATA" ] && echo "$SECRET_DATA" > "$ENVFILE"
         fi
-        # Mergear extra_env_vars SOBRE el secret (override por-deploy).
-        if [ -n "${{ inputs.extra_env_vars }}" ]; then
-          EXTRA_ENV="${{ inputs.extra_env_vars }}" ENVFILE="$ENVFILE" python3 -c "import json,os; f=os.environ['ENVFILE']; d=json.load(open(f)); [d.__setitem__(p.split('=',1)[0].strip(), p.split('=',1)[1].strip()) for p in os.environ['EXTRA_ENV'].split(',') if '=' in p]; json.dump(d, open(f,'w'))"
-        fi
-        # Usar el file solo si tiene contenido real (no solo "{}").
-        if [ "$(tr -d '[:space:]' < "$ENVFILE")" != "{}" ]; then
-          ENV_FLAG="--env-vars-file $ENVFILE"
+        # Como se aplican los extra_env_vars depende de si hay secreto de por medio.
+        #
+        # CON secreto: se mergean sobre el, y el conjunto va con --env-vars-file, que
+        # REEMPLAZA todas las env vars del servicio. Es lo correcto: el secreto es la
+        # fuente de verdad completa, asi que lo que no este ahi debe desaparecer.
+        #
+        # SIN secreto (use_secret_manager: false): el servicio tiene su config puesta
+        # por otra via y este workflow no la conoce. Mandar --env-vars-file con solo
+        # los extras BORRARIA todo lo demas. Paso en cpel-backend: un deploy con
+        # use_secret_manager:false + extra_env_vars dejo el servicio con 1 env var de
+        # 43. Por eso aca se usa --update-env-vars, que MERGEA sobre lo que ya hay.
+        if [ "${{ inputs.use_secret_manager }}" = "true" ]; then
+          if [ -n "${{ inputs.extra_env_vars }}" ]; then
+            EXTRA_ENV="${{ inputs.extra_env_vars }}" ENVFILE="$ENVFILE" python3 -c "import json,os; f=os.environ['ENVFILE']; d=json.load(open(f)); [d.__setitem__(p.split('=',1)[0].strip(), p.split('=',1)[1].strip()) for p in os.environ['EXTRA_ENV'].split(',') if '=' in p]; json.dump(d, open(f,'w'))"
+          fi
+          # Usar el file solo si tiene contenido real (no solo "{}").
+          if [ "$(tr -d '[:space:]' < "$ENVFILE")" != "{}" ]; then
+            ENV_FLAG="--env-vars-file $ENVFILE"
+          fi
+        elif [ -n "${{ inputs.extra_env_vars }}" ]; then
+          # --update-env-vars agrega/pisa SOLO las claves indicadas y deja el resto.
+          ENV_FLAG="--update-env-vars ${{ inputs.extra_env_vars }}"
         fi
 
         gcloud run deploy ${{ inputs.service_name }} \
