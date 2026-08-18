@@ -132,15 +132,15 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_url }}
         run: |
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            curl -s -X POST "$SLACK_WEBHOOK_URL" \\
-              -H 'Content-type: application/json' \\
+            curl -s -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
               -d '{
                 "blocks": [
                   {
                     "type": "section",
                     "text": {
                       "type": "mrkdwn",
-                      "text": "✅ *Firebase Deploy Exitoso (test)*\\n*Repo:* ${{ github.repository }}\\n*Project:* ${{ inputs.project_test }}\\n*Actor:* ${{ github.actor }}\\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver run>"
+                      "text": "✅ *Firebase Deploy Exitoso (test)*\n*Repo:* ${{ github.repository }}\n*Project:* ${{ inputs.project_test }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver run>"
                     }
                   }
                 ]
