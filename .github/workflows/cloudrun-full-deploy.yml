@@ -287,7 +287,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "❌ *Cloud Run Deploy Fallido*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
+                    "text": "❌ *Cloud Run Deploy Fallido (${{ inputs.environment }})*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver logs>"
                   }
                 }
               ]
@@ -308,7 +308,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "✅ *Cloud Run Deploy Exitoso (prod)*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver run>"
+                    "text": "✅ *Cloud Run Deploy Exitoso (${{ inputs.environment }})*\n*Service:* ${{ inputs.service_name }}\n*Project:* ${{ inputs.project_id }}\n*Actor:* ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Ver run>"
                   }
                 }
               ]
