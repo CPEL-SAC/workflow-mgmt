@@ -3,6 +3,11 @@ name: Deploy to Cloud Run from Source
 on:
   workflow_call:
     inputs:
+      runner:
+        description: 'Runner donde corre. Default ubuntu-latest; usar oxiacore-runner para el self-hosted.'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
       service_name:
         required: true
         type: string
@@ -33,7 +38,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
