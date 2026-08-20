@@ -78,6 +78,20 @@ on:
         required: false
         type: string
         default: 'ubuntu-latest'
+      # Runner POR ENTORNO. Permiten migrar test sin tocar prod, que es como se
+      # valida el cambio antes de exponerlo a produccion. Si se dejan vacios, cada
+      # job cae al valor de 'runner': retrocompatible, los callers que solo pasan
+      # 'runner' (o ninguno) se comportan exactamente igual que antes.
+      runner_test:
+        description: 'Runner solo para deploy-test. Vacio = usa el valor de runner.'
+        required: false
+        type: string
+        default: ''
+      runner_prod:
+        description: 'Runner solo para deploy-prod. Vacio = usa el valor de runner.'
+        required: false
+        type: string
+        default: ''
     secrets:
       sa_prod:
         required: true
@@ -90,7 +104,7 @@ jobs:
   deploy-test:
     name: Deploy → ${{ inputs.project_test }} (test)
     if: github.ref == 'refs/heads/test'
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner_test != '' && inputs.runner_test || inputs.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -160,7 +174,7 @@ jobs:
   deploy-prod:
     name: Deploy → ${{ inputs.project_prod }} (prod)
     if: github.ref == 'refs/heads/master'
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner_prod != '' && inputs.runner_prod || inputs.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
