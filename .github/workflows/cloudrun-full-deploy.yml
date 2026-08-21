@@ -14,6 +14,10 @@ on:
       project_id:
         required: true
         type: string
+      # Nombre VISIBLE del entorno: va al tag de la imagen (`<environment>-<commit>`) y a
+      # la etiqueta del aviso de Slack. Usar `test` / `prod`, que es como se llaman las
+      # ramas y como los nombra todo el mundo. NO condiciona el nombre del secreto: ese
+      # sigue la convencion `-dev` / `-prod` de central-secrets (ver el mapeo mas abajo).
       environment:
         required: false
         type: string
@@ -133,8 +137,14 @@ jobs:
     - name: Generate image tag
       id: tag
       run: |
-        TAG="${{ inputs.environment }}-$(git rev-parse --short HEAD)"
+        SHA="$(git rev-parse --short HEAD)"
+        TAG="${{ inputs.environment }}-${SHA}"
         URL="${{ inputs.region }}-docker.pkg.dev/${{ inputs.project_id }}/${{ inputs.registry_name }}/${{ inputs.service_name }}:${TAG}"
+        # Para labels de Cloud Run: solo [a-z0-9_-]. Una rama tipo `feat/x` rompe el
+        # deploy si se pasa cruda.
+        BRANCH="$(printf '%s' "${{ github.ref_name }}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')"
+        echo "sha=${SHA}" >> $GITHUB_OUTPUT
+        echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
         echo "tag=${TAG}" >> $GITHUB_OUTPUT
         echo "url=${URL}" >> $GITHUB_OUTPUT
 
@@ -211,7 +221,16 @@ jobs:
         echo "{}" > "$ENVFILE"
         if [ "${{ inputs.use_secret_manager }}" = "true" ]; then
           SECRET_NAME="${{ inputs.secret_name }}"
-          [ -z "$SECRET_NAME" ] && SECRET_NAME="${{ inputs.service_name }}-${{ inputs.environment }}"
+          # El sufijo del secreto NO es el nombre visible del entorno. La convencion de
+          # central-secrets es `-dev` / `-prod` (igual que los repos secrets-projects-*),
+          # aunque la rama y el entorno se llamen `test`. Sin este mapeo, un caller con
+          # `environment: test` buscaria `<app>-test`, que no existe, y arrancaria sin
+          # configuracion.
+          case "${{ inputs.environment }}" in
+            prod|production) SECRET_SFX=prod ;;
+            *)               SECRET_SFX=dev  ;;
+          esac
+          [ -z "$SECRET_NAME" ] && SECRET_NAME="${{ inputs.service_name }}-${SECRET_SFX}"
           SECRET_DATA=$(gcloud secrets versions access latest \
             --secret="${SECRET_NAME}" \
             --project=central-secrets 2>/dev/null || echo "{}")
@@ -241,8 +260,16 @@ jobs:
           ENV_FLAG="--update-env-vars ${{ inputs.extra_env_vars }}"
         fi
 
+        # --revision-suffix: el nombre de la revision pasa de `svc-00022-9kg` (sufijo
+        # aleatorio, no dice nada) a `svc-<commit>-<run>`, que es lo primero que se ve en
+        # la consola. Va el run_number ademas del commit porque los nombres de revision
+        # son unicos para siempre: sin el, un re-run o un redeploy del mismo commit falla.
+        # Limite: `<service>-<sufijo>` <= 63 caracteres.
+        # --update-labels (NO --labels): `--labels` PISA todas las etiquetas existentes.
         gcloud run deploy ${{ inputs.service_name }} \
           --image ${{ steps.tag.outputs.url }} \
+          --revision-suffix ${{ steps.tag.outputs.sha }}-${{ github.run_number }} \
+          --update-labels commit=${{ steps.tag.outputs.sha }},branch=${{ steps.tag.outputs.branch }} \
           --platform managed \
           --region ${{ inputs.region }} \
           --project ${{ inputs.project_id }} \
